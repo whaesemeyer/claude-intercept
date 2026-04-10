@@ -1,0 +1,1406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Intercept</title>
+<style>
+  :root {
+    --bg:        #0d1117;
+    --surface:   #161b22;
+    --surface2:  #1c2128;
+    --border:    #30363d;
+    --border2:   #21262d;
+    --text:      #e6edf3;
+    --text2:     #8b949e;
+    --text3:     #656d76;
+    --accent:    #388bfd;
+    --accent-dim:#1f4a8a;
+    --get:       #3fb950;
+    --post:      #388bfd;
+    --put:       #d29922;
+    --delete:    #f85149;
+    --patch:     #a371f7;
+    --options:   #8b949e;
+    --s2xx:      #3fb950;
+    --s3xx:      #d29922;
+    --s4xx:      #f0883e;
+    --s5xx:      #f85149;
+    --radius:    6px;
+    --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0 16px;
+    height: 48px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .logo { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; letter-spacing: -0.3px; }
+  .logo-icon {
+    width: 22px; height: 22px;
+    background: linear-gradient(135deg, #388bfd, #a371f7);
+    border-radius: 5px;
+    display: flex; align-items: center; justify-content: center; font-size: 12px;
+  }
+  .header-stats { margin-left: auto; display: flex; gap: 16px; align-items: center; color: var(--text2); font-size: 12px; }
+  .stat-pill { display: flex; align-items: center; gap: 4px; }
+  .stat-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--s2xx); }
+  .stat-dot.offline { background: var(--delete); animation: none; }
+  .stat-dot.live { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* ── Pause/record button ── */
+  .rec-btn {
+    display: flex; align-items: center; gap: 7px;
+    border-radius: var(--radius); padding: 5px 14px; font-size: 12px; font-weight: 600;
+    cursor: pointer; transition: all .2s; border: 1px solid; letter-spacing: .2px;
+    white-space: nowrap;
+  }
+  .rec-btn.recording {
+    background: rgba(63,185,80,.12); border-color: rgba(63,185,80,.5); color: var(--s2xx);
+  }
+  .rec-btn.paused {
+    background: rgba(210,153,34,.18); border-color: rgba(210,153,34,.6); color: var(--put);
+  }
+  .rec-dot {
+    width: 9px; height: 9px; border-radius: 50%; background: currentColor; flex-shrink: 0;
+  }
+  .rec-btn.recording .rec-dot { animation: pulse 1.4s infinite; }
+  .rec-btn.paused .rec-dot { border-radius: 2px; animation: none; }
+
+  /* ── Nav ── */
+  nav {
+    display: flex; background: var(--surface);
+    border-bottom: 1px solid var(--border); padding: 0 16px; flex-shrink: 0;
+  }
+  nav button {
+    background: none; border: none; color: var(--text2);
+    padding: 8px 14px; cursor: pointer; font-size: 13px;
+    border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; margin-bottom: -1px;
+  }
+  nav button:hover { color: var(--text); }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  /* ── Layout ── */
+  main { display: flex; flex: 1; overflow: hidden; }
+  .panel { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+  .panel.active { display: flex; }
+  #tab-setup { overflow-y: auto; }
+  #tab-export { overflow-y: auto; }
+
+  /* ── Traffic panel ── */
+  .traffic-layout { display: flex; flex: 1; overflow: hidden; }
+  .traffic-left { width: 55%; display: flex; flex-direction: column; border-right: 1px solid var(--border); min-width: 0; }
+  .traffic-right { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  /* ── Filter bar ── */
+  .filter-bar {
+    display: flex; gap: 6px; padding: 8px 10px;
+    background: var(--surface); border-bottom: 1px solid var(--border2); flex-shrink: 0; flex-wrap: wrap;
+  }
+  .filter-bar input, .filter-bar select {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--radius); padding: 4px 8px; font-size: 12px; outline: none; height: 28px;
+  }
+  .filter-bar input:focus, .filter-bar select:focus { border-color: var(--accent); }
+  .filter-bar input[type="search"] { flex: 1; min-width: 120px; }
+  .filter-bar select { width: 90px; }
+  .btn {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    border-radius: var(--radius); padding: 4px 10px; font-size: 12px; cursor: pointer;
+    height: 28px; white-space: nowrap; transition: background .15s, border-color .15s;
+  }
+  .btn:hover { background: var(--border); }
+  .btn.primary { background: var(--accent-dim); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent); }
+  .btn.danger { border-color: var(--delete); color: var(--delete); }
+  .btn.danger:hover { background: rgba(248,81,73,.15); }
+  .btn:disabled { opacity: .5; cursor: default; }
+
+  /* ── Traffic list ── */
+  .traffic-list { flex: 1; overflow-y: auto; overflow-x: hidden; }
+  .traffic-list::-webkit-scrollbar { width: 6px; }
+  .traffic-list::-webkit-scrollbar-track { background: transparent; }
+  .traffic-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .capture-row {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-bottom: 1px solid var(--border2); cursor: pointer; transition: background .1s; min-width: 0;
+  }
+  .capture-row:hover { background: var(--surface); }
+  .capture-row.selected { background: var(--accent-dim); border-color: var(--accent); }
+  .method-badge {
+    font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+    padding: 2px 5px; border-radius: 3px; min-width: 46px; text-align: center;
+    flex-shrink: 0; letter-spacing: 0.3px;
+  }
+  .method-GET    { background: rgba(63,185,80,.15);  color: var(--get);    border: 1px solid rgba(63,185,80,.3); }
+  .method-POST   { background: rgba(56,139,253,.15); color: var(--post);   border: 1px solid rgba(56,139,253,.3); }
+  .method-PUT    { background: rgba(210,153,34,.15); color: var(--put);    border: 1px solid rgba(210,153,34,.3); }
+  .method-DELETE { background: rgba(248,81,73,.15);  color: var(--delete); border: 1px solid rgba(248,81,73,.3); }
+  .method-PATCH  { background: rgba(163,113,247,.15);color: var(--patch);  border: 1px solid rgba(163,113,247,.3); }
+  .method-OPTIONS{ background: rgba(139,148,158,.1); color: var(--options);border: 1px solid rgba(139,148,158,.2); }
+  .status-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 600; min-width: 32px; text-align: center; flex-shrink: 0; }
+  .s-2xx { color: var(--s2xx); } .s-3xx { color: var(--s3xx); }
+  .s-4xx { color: var(--s4xx); } .s-5xx { color: var(--s5xx); } .s-0 { color: var(--text3); }
+  .capture-url { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 11px; color: var(--text2); }
+  .capture-url .host { color: var(--text); }
+  .capture-meta { flex-shrink: 0; color: var(--text3); font-size: 10px; text-align: right; }
+  .capture-checkbox { flex-shrink: 0; accent-color: var(--accent); }
+
+  /* ── Inspector ── */
+  .inspector { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+  .inspector-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text3); gap: 8px; }
+  .inspector-empty svg { opacity: .3; }
+  .inspector-header { padding: 10px 14px; border-bottom: 1px solid var(--border2); background: var(--surface); flex-shrink: 0; }
+  .inspector-header .url-line { font-family: var(--font-mono); font-size: 12px; color: var(--text2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .inspector-header .meta-line { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--text3); }
+  .inspector-tabs { display: flex; border-bottom: 1px solid var(--border2); background: var(--surface); flex-shrink: 0; }
+  .inspector-tabs button { background: none; border: none; color: var(--text2); padding: 6px 12px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .inspector-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+  .inspector-tabs button:hover { color: var(--text); }
+  .inspector-body { flex: 1; overflow-y: auto; padding: 12px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
+  .inspector-body::-webkit-scrollbar { width: 6px; }
+  .inspector-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .headers-table { width: 100%; border-collapse: collapse; }
+  .headers-table tr:not(:last-child) td { border-bottom: 1px solid var(--border2); }
+  .headers-table td { padding: 4px 8px 4px 0; vertical-align: top; }
+  .headers-table td:first-child { color: var(--text2); padding-right: 16px; white-space: nowrap; }
+  .headers-table td:last-child { color: var(--text); word-break: break-all; }
+  .body-content { white-space: pre-wrap; word-break: break-all; color: var(--text); background: var(--surface2); border: 1px solid var(--border2); border-radius: var(--radius); padding: 10px; overflow-x: auto; }
+  .auth-tag { display: inline-block; background: rgba(210,153,34,.15); border: 1px solid rgba(210,153,34,.3); color: var(--put); padding: 2px 6px; border-radius: 3px; font-size: 10px; margin-right: 6px; font-family: var(--font-mono); }
+  .device-badge {
+    font-size: 9px; padding: 1px 5px; border-radius: 3px; white-space: nowrap; flex-shrink: 0;
+    background: rgba(139,148,158,.1); border: 1px solid rgba(139,148,158,.2); color: var(--text3);
+  }
+  .device-badge.mobile { background: rgba(163,113,247,.1); border-color: rgba(163,113,247,.2); color: var(--patch); }
+  .device-badge.android { background: rgba(63,185,80,.1); border-color: rgba(63,185,80,.2); color: var(--s2xx); }
+
+  /* ── Export panel ── */
+  .export-panel { padding: 20px; display: flex; flex-direction: column; gap: 14px; max-width: 800px; width: 100%; margin: 0 auto; }
+  .export-panel h2 { font-size: 16px; }
+  .export-panel p { color: var(--text2); line-height: 1.6; }
+  .export-options { display: flex; gap: 10px; flex-wrap: wrap; }
+  .export-option { flex: 1; min-width: 180px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; cursor: pointer; transition: border-color .15s; }
+  .export-option:hover, .export-option.selected { border-color: var(--accent); }
+  .export-option h3 { font-size: 13px; margin-bottom: 4px; }
+  .export-option p { font-size: 12px; color: var(--text2); }
+  .export-output { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; font-family: var(--font-mono); font-size: 12px; color: var(--text2); white-space: pre-wrap; word-break: break-all; max-height: 400px; overflow-y: auto; }
+  .export-output::-webkit-scrollbar { width: 6px; }
+  .export-output::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ── Setup panel ── */
+  .setup-panel { padding: 20px 20px 48px; display: flex; flex-direction: column; gap: 14px; max-width: 820px; margin: 0 auto; width: 100%; }
+  .setup-panel h2 { font-size: 16px; }
+
+  /* IP info bar */
+  .ip-info-bar {
+    display: flex; gap: 10px; flex-wrap: wrap;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px;
+  }
+  .ip-chip {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface2); border: 1px solid var(--border2); border-radius: var(--radius); padding: 6px 12px;
+  }
+  .ip-chip .label { color: var(--text3); font-size: 11px; }
+  .ip-chip .value { color: var(--text); font-family: var(--font-mono); font-size: 12px; }
+  .ip-chip.tailscale .label { color: var(--patch); }
+  .ip-chip.tailscale .value { color: var(--patch); }
+
+  /* local proxy bar */
+  .local-proxy-bar {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 16px;
+  }
+
+  /* platform tabs */
+  .setup-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .platform-btn {
+    background: var(--surface); border: 1px solid var(--border); color: var(--text2);
+    border-radius: var(--radius); padding: 6px 14px; cursor: pointer; font-size: 13px; transition: all .15s;
+  }
+  .platform-btn:hover, .platform-btn.active { background: var(--accent-dim); border-color: var(--accent); color: var(--text); }
+
+  /* steps */
+  .setup-instructions { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .setup-step { display: flex; gap: 14px; padding: 16px; border-bottom: 1px solid var(--border2); }
+  .setup-step:last-child { border-bottom: none; }
+  .step-num { width: 24px; height: 24px; border-radius: 50%; background: var(--accent-dim); border: 1px solid var(--accent); color: var(--text); font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; }
+  .step-body { flex: 1; min-width: 0; }
+  .step-body h4 { font-size: 13px; margin-bottom: 6px; }
+  .step-body p { color: var(--text2); line-height: 1.7; font-size: 12px; }
+  .step-body code { background: var(--surface2); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; font-family: var(--font-mono); font-size: 11px; color: var(--get); }
+  .step-body strong { color: var(--text); }
+  .step-body pre { background: var(--surface2); border: 1px solid var(--border2); border-radius: var(--radius); padding: 10px 12px; margin-top: 8px; font-family: var(--font-mono); font-size: 11px; color: var(--text2); white-space: pre-wrap; word-break: break-all; }
+
+  /* QR codes */
+  .qr-section { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; padding-bottom: 8px; }
+  .qr-block { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .qr-block img { border-radius: var(--radius); border: 2px solid var(--border); display: block; }
+  .qr-label { font-size: 11px; color: var(--text3); text-align: center; max-width: 160px; }
+  .qr-label.tailscale { color: var(--patch); }
+
+  /* cert download */
+  .cert-download { display: flex; align-items: center; gap: 10px; background: rgba(56,139,253,.1); border: 1px solid rgba(56,139,253,.3); border-radius: var(--radius); padding: 12px 16px; }
+  .cert-download a { color: var(--accent); text-decoration: none; font-weight: 600; font-size: 13px; }
+  .cert-download a:hover { text-decoration: underline; }
+  .cert-download p { color: var(--text2); font-size: 12px; }
+
+  /* ── Welcome banner ── */
+  .welcome-banner {
+    background: linear-gradient(135deg, rgba(56,139,253,.15) 0%, rgba(163,113,247,.1) 100%);
+    border: 1px solid rgba(56,139,253,.3);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    display: flex; gap: 16px; align-items: flex-start;
+    flex-shrink: 0;
+  }
+  .welcome-banner .icon { font-size: 24px; flex-shrink: 0; margin-top: 2px; }
+  .welcome-banner h3 { font-size: 14px; margin-bottom: 4px; }
+  .welcome-banner p { color: var(--text2); font-size: 12px; line-height: 1.6; }
+  .welcome-banner .actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+  /* ── Empty / utility ── */
+  .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--text3); gap: 8px; padding: 40px; text-align: center; }
+  .empty-state .label { font-size: 14px; color: var(--text2); }
+  .empty-state .hint { font-size: 12px; }
+  .selected-count { font-size: 11px; color: var(--text2); padding: 0 4px; align-self: center; }
+
+  /* ── Welcome modal ── */
+  .modal-backdrop {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(1,4,9,.85);
+    backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+    opacity: 0; transition: opacity .25s;
+    pointer-events: none;
+  }
+  .modal-backdrop.visible { opacity: 1; pointer-events: all; }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 560px;
+    overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0,0,0,.6);
+    transform: translateY(12px); transition: transform .25s;
+  }
+  .modal-backdrop.visible .modal { transform: translateY(0); }
+
+  /* Progress bar at top */
+  .modal-progress {
+    height: 3px;
+    background: var(--border2);
+    position: relative;
+  }
+  .modal-progress-fill {
+    position: absolute; inset: 0 auto 0 0;
+    background: linear-gradient(90deg, var(--accent), var(--patch));
+    transition: width .4s cubic-bezier(.4,0,.2,1);
+    border-radius: 0 2px 2px 0;
+  }
+
+  /* Step slides */
+  .modal-slides { overflow: hidden; position: relative; }
+  .modal-slide {
+    padding: 32px 32px 24px;
+    display: none; flex-direction: column; gap: 16px;
+    animation: slideIn .25s ease;
+  }
+  .modal-slide.active { display: flex; }
+  @keyframes slideIn { from { opacity:0; transform:translateX(20px); } to { opacity:1; transform:none; } }
+
+  .modal-slide .slide-icon {
+    font-size: 36px; line-height: 1;
+    display: inline-block;
+  }
+  .modal-slide h2 { font-size: 20px; font-weight: 700; letter-spacing: -.3px; }
+  .modal-slide .subtitle { color: var(--text2); font-size: 14px; line-height: 1.6; }
+  .modal-slide .subtitle strong { color: var(--text); }
+
+  /* Feature list (slide 1) */
+  .feature-list { display: flex; flex-direction: column; gap: 10px; }
+  .feature-item { display: flex; gap: 12px; align-items: flex-start; }
+  .feature-dot {
+    width: 28px; height: 28px; border-radius: 7px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 14px;
+  }
+  .feature-dot.blue  { background: rgba(56,139,253,.15);  border: 1px solid rgba(56,139,253,.3); }
+  .feature-dot.green { background: rgba(63,185,80,.15);   border: 1px solid rgba(63,185,80,.3); }
+  .feature-dot.purple{ background: rgba(163,113,247,.15); border: 1px solid rgba(163,113,247,.3); }
+  .feature-dot.gold  { background: rgba(210,153,34,.15);  border: 1px solid rgba(210,153,34,.3); }
+  .feature-text .ftitle { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .feature-text .fdesc  { font-size: 12px; color: var(--text2); line-height: 1.5; }
+
+  /* Step cards (slides 2–4) */
+  .step-card {
+    background: var(--surface2); border: 1px solid var(--border2);
+    border-radius: 8px; padding: 14px 16px;
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  .step-card .card-num {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--accent-dim); border: 1px solid var(--accent);
+    color: var(--text); font-size: 11px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .step-card .card-body { flex: 1; min-width: 0; }
+  .step-card .card-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+  .step-card .card-desc  { font-size: 12px; color: var(--text2); line-height: 1.6; }
+  .step-card .card-desc code {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 3px; padding: 1px 5px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--get);
+  }
+  .step-card pre {
+    background: var(--bg); border: 1px solid var(--border2);
+    border-radius: 6px; padding: 10px 12px; margin-top: 8px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--text2);
+    white-space: pre-wrap; word-break: break-all; position: relative;
+  }
+  .copy-btn {
+    position: absolute; top: 6px; right: 8px;
+    background: var(--surface2); border: 1px solid var(--border);
+    color: var(--text2); border-radius: 4px; padding: 2px 7px;
+    font-size: 10px; cursor: pointer; transition: all .15s;
+  }
+  .copy-btn:hover { background: var(--border); color: var(--text); }
+
+  /* notice box */
+  .modal-notice {
+    background: rgba(63,185,80,.08); border: 1px solid rgba(63,185,80,.2);
+    border-radius: 6px; padding: 10px 14px;
+    font-size: 12px; color: var(--text2); line-height: 1.6;
+  }
+  .modal-notice strong { color: var(--s2xx); }
+
+  /* warning box */
+  .modal-warning {
+    background: rgba(210,153,34,.08); border: 1px solid rgba(210,153,34,.2);
+    border-radius: 6px; padding: 10px 14px;
+    font-size: 12px; color: var(--text2); line-height: 1.6;
+  }
+  .modal-warning strong { color: var(--put); }
+
+  /* footer */
+  .modal-footer {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 32px 24px; gap: 12px;
+  }
+  .modal-dots { display: flex; gap: 6px; }
+  .modal-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--border); transition: all .2s;
+  }
+  .modal-dot.active { background: var(--accent); width: 18px; border-radius: 3px; }
+  .modal-actions { display: flex; gap: 8px; }
+  .btn-lg {
+    border-radius: 8px; padding: 8px 20px; font-size: 13px;
+    font-weight: 600; cursor: pointer; border: 1px solid transparent; transition: all .15s;
+  }
+  .btn-lg.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn-lg.primary:hover { background: #1a7cf5; }
+  .btn-lg.ghost { background: transparent; color: var(--text2); border-color: var(--border); }
+  .btn-lg.ghost:hover { background: var(--surface2); color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">⊕</div>
+    Claude Intercept
+  </div>
+  <div class="header-stats">
+    <div class="stat-pill">
+      <div class="stat-dot" id="status-dot"></div>
+      <span id="status-text">Connecting…</span>
+    </div>
+    <span id="stat-total">0 requests</span>
+    <span id="stat-hosts">0 hosts</span>
+    <span id="proxy-port-label">:7777</span>
+    <button id="btn-pause" class="rec-btn recording" onclick="togglePause()">
+      <span class="rec-dot"></span>
+      <span id="pause-label">Recording</span>
+    </button>
+  </div>
+</header>
+
+<nav id="main-nav">
+  <button class="active" onclick="showTab('traffic', this)">Traffic</button>
+  <button onclick="showTab('export', this)">Export for Claude</button>
+  <button onclick="showTab('setup', this)">Setup &amp; Certs</button>
+</nav>
+
+<main>
+  <!-- ── Traffic panel ── -->
+  <div class="panel active" id="tab-traffic">
+    <div class="traffic-layout">
+      <div class="traffic-left">
+        <div class="filter-bar">
+          <input type="search" id="f-search" placeholder="Search URL, body…" oninput="applyFilters()">
+          <input type="text" id="f-host" placeholder="Host" style="width:120px" oninput="applyFilters()">
+          <select id="f-method" onchange="applyFilters()">
+            <option value="">All Methods</option>
+            <option>GET</option><option>POST</option><option>PUT</option>
+            <option>DELETE</option><option>PATCH</option><option>OPTIONS</option>
+          </select>
+          <select id="f-status" onchange="applyFilters()">
+            <option value="">All Statuses</option>
+            <option value="2xx">2xx Success</option><option value="3xx">3xx Redirect</option>
+            <option value="4xx">4xx Error</option><option value="5xx">5xx Server Error</option>
+          </select>
+          <select id="f-device" onchange="applyFilters()" style="width:120px">
+            <option value="">All Devices</option>
+          </select>
+        </div>
+        <div class="filter-bar" style="border-top:none;padding-top:4px;padding-bottom:4px;gap:6px;align-items:center">
+          <span id="filter-match-count" style="font-size:11px;color:var(--text3);min-width:70px"></span>
+          <button class="btn" onclick="selectAll()">Select All</button>
+          <button class="btn" onclick="selectFiltered()" id="btn-sel-filtered" title="Select rows matching current filters" style="display:none">Select Filtered</button>
+          <button class="btn" onclick="clearSelection()" id="btn-deselect" style="display:none">Deselect All</button>
+          <span class="selected-count" id="sel-count"></span>
+          <div style="flex:1"></div>
+          <button class="btn primary" onclick="exportSelected()" id="btn-export-sel" style="display:none">Export Selected →</button>
+          <button class="btn danger" onclick="deleteSelected()" id="btn-delete-sel" style="display:none">Delete Selected</button>
+          <button class="btn danger" onclick="clearCaptures()" style="border-color:var(--border);color:var(--text3)" title="Clear all captures">Clear All</button>
+        </div>
+        <div class="traffic-list" id="traffic-list">
+          <div class="empty-state">
+            <div class="label">No traffic yet</div>
+            <div class="hint">Set up your proxy in the <strong>Setup &amp; Certs</strong> tab, then browse.</div>
+          </div>
+        </div>
+      </div>
+      <div class="traffic-right">
+        <div class="inspector" id="inspector">
+          <div class="inspector-empty">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+            </svg>
+            <div>Select a request to inspect</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Export panel ── -->
+  <div class="panel" id="tab-export">
+    <div class="export-panel">
+      <h2>Export Captures for Claude</h2>
+      <p>Select captures in the Traffic tab (checkboxes), choose an export mode, then copy the output into Claude for analysis.</p>
+      <div style="background:rgba(56,139,253,.08);border:1px solid rgba(56,139,253,.25);border-radius:var(--radius);padding:12px 16px;font-size:12px;color:var(--text2);line-height:1.7">
+        <strong style="color:var(--accent)">Tip — let Claude do it directly.</strong>
+        In any Claude Code session, type <strong><code style="background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--get)">/intercept</code></strong> and ask Claude to analyze your traffic. It can run the export, read the output, and give you a full analysis — no copy/paste needed. For example: <em>"analyze the last 50 requests and document any undiscovered API endpoints"</em> or <em>"extract all auth tokens from today's captures."</em>
+      </div>
+      <div class="export-options">
+        <div class="export-option selected" data-mode="api-docs" onclick="selectExportMode(this)">
+          <h3>API Documentation</h3>
+          <p>Documents discovered endpoints, parameters, and schemas.</p>
+        </div>
+        <div class="export-option" data-mode="auth" onclick="selectExportMode(this)">
+          <h3>Auth Extraction</h3>
+          <p>Extracts cookies, tokens, Authorization headers, and session data.</p>
+        </div>
+        <div class="export-option" data-mode="summary" onclick="selectExportMode(this)">
+          <h3>Traffic Summary</h3>
+          <p>High-level overview of all captured requests and patterns.</p>
+        </div>
+        <div class="export-option" data-mode="full" onclick="selectExportMode(this)">
+          <h3>Full Detail</h3>
+          <p>Complete headers and bodies for deep analysis.</p>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn primary" onclick="generateExport()">Generate Export</button>
+        <button class="btn" onclick="copyExport()">Copy to Clipboard</button>
+        <span id="export-info" style="color:var(--text3);font-size:12px"></span>
+      </div>
+      <pre class="export-output" id="export-output">Click "Generate Export" to build output…</pre>
+    </div>
+  </div>
+
+  <!-- ── Setup panel ── -->
+  <div class="panel" id="tab-setup">
+    <div class="setup-panel">
+      <h2>Proxy Setup &amp; Certificate Installation</h2>
+
+      <!-- IP addresses -->
+      <div class="ip-info-bar" id="ip-info-bar">
+        <div style="flex:1;color:var(--text2);font-size:12px">Loading network info…</div>
+      </div>
+
+      <!-- Cert download -->
+      <div class="cert-download">
+        <div>
+          <a href="/api/cert" download="claude-intercept-ca.crt">⬇ Download CA Certificate</a>
+          <p>Install this certificate as a trusted root CA on the device you want to intercept. One-time setup.</p>
+        </div>
+      </div>
+
+      <!-- This Mac toggle -->
+      <div class="local-proxy-bar" id="local-proxy-bar">
+        <div style="flex:1">
+          <div style="font-weight:600;font-size:13px;margin-bottom:3px">This Mac — System Proxy</div>
+          <div id="local-proxy-status" style="font-size:12px;color:var(--text2)">Checking…</div>
+        </div>
+        <button class="btn primary" id="btn-proxy-on"  onclick="setLocalProxy(true)"  style="display:none">Enable for This Mac</button>
+        <button class="btn danger"  id="btn-proxy-off" onclick="setLocalProxy(false)" style="display:none">Disable</button>
+      </div>
+
+      <!-- Platform tabs -->
+      <div class="setup-tabs">
+        <button class="platform-btn active" onclick="showPlatform('this-mac', this)">This Mac</button>
+        <button class="platform-btn" onclick="showPlatform('ios', this)">iOS / iPadOS</button>
+        <button class="platform-btn" onclick="showPlatform('android', this)">Android</button>
+        <button class="platform-btn" onclick="showPlatform('macos', this)">macOS (manual)</button>
+        <button class="platform-btn" onclick="showPlatform('windows', this)">Windows</button>
+        <button class="platform-btn" onclick="showPlatform('linux', this)">Linux</button>
+        <button class="platform-btn" onclick="showPlatform('firefox', this)">Firefox</button>
+      </div>
+
+      <div class="setup-instructions" id="setup-instructions">
+        <div style="padding:20px;color:var(--text2)">Loading…</div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ── Welcome modal ── -->
+<div class="modal-backdrop" id="welcome-backdrop">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Welcome to Claude Intercept">
+
+    <div class="modal-progress">
+      <div class="modal-progress-fill" id="modal-progress-fill" style="width:25%"></div>
+    </div>
+
+    <div class="modal-slides">
+
+      <!-- Slide 1 — What is this? -->
+      <div class="modal-slide active" id="slide-0">
+        <span class="slide-icon">⊕</span>
+        <h2>Welcome to Claude Intercept</h2>
+        <p class="subtitle">A lightweight MITM proxy that captures HTTP/S traffic from your Mac, iPhone, or any device — then lets you feed it directly to Claude for analysis.</p>
+        <div class="feature-list">
+          <div class="feature-item">
+            <div class="feature-dot blue">🔍</div>
+            <div class="feature-text">
+              <div class="ftitle">Capture all traffic</div>
+              <div class="fdesc">Intercept HTTP and HTTPS from browsers, apps, CLI tools, and mobile devices in real time.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-dot green">🔑</div>
+            <div class="feature-text">
+              <div class="ftitle">Extract auth & tokens</div>
+              <div class="fdesc">Automatically surface API keys, Bearer tokens, cookies, and JWTs from captured traffic.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-dot purple">📄</div>
+            <div class="feature-text">
+              <div class="ftitle">Document undiscovered APIs</div>
+              <div class="fdesc">Export captured endpoints as structured Markdown — paste straight into Claude for analysis.</div>
+            </div>
+          </div>
+          <div class="feature-item">
+            <div class="feature-dot gold">📱</div>
+            <div class="feature-text">
+              <div class="ftitle">Intercept phones too</div>
+              <div class="fdesc">Works with iOS, Android, or any device on the same network. QR-code cert install included.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Slide 2 — Install CA cert -->
+      <div class="modal-slide" id="slide-1">
+        <span class="slide-icon">🔒</span>
+        <h2>Install the CA Certificate</h2>
+        <p class="subtitle">To read HTTPS traffic, your device needs to trust Claude Intercept's certificate authority. This is a <strong>one-time setup</strong> that takes about 30 seconds.</p>
+        <div class="step-card">
+          <div class="card-num">1</div>
+          <div class="card-body">
+            <div class="card-title">Download the certificate</div>
+            <div class="card-desc">Click the button below to save <code>claude-intercept-ca.crt</code> to your Downloads folder.</div>
+            <div style="margin-top:10px">
+              <a href="/api/cert" download="claude-intercept-ca.crt" class="btn-lg primary" style="text-decoration:none;display:inline-block">⬇ Download CA Certificate</a>
+            </div>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="card-num">2</div>
+          <div class="card-body">
+            <div class="card-title">Trust it on macOS</div>
+            <div class="card-desc">Run this command in Terminal (you'll be prompted for your password):</div>
+            <pre id="cert-cmd">sudo security add-trusted-cert -d -r trustRoot \
+  -k /Library/Keychains/System.keychain \
+  ~/Downloads/claude-intercept-ca.crt<button class="copy-btn" onclick="copyCode('cert-cmd', this)">Copy</button></pre>
+          </div>
+        </div>
+        <div class="modal-notice">
+          <strong>Your privacy is protected.</strong> The CA private key is stored only on this machine at <code>~/claude_intercept/certs/ca.key</code> and is never transmitted anywhere.
+        </div>
+      </div>
+
+      <!-- Slide 3 — Enable proxy -->
+      <div class="modal-slide" id="slide-2">
+        <span class="slide-icon">🌐</span>
+        <h2>Enable the Proxy</h2>
+        <p class="subtitle">Claude Intercept is a standard HTTP/S proxy running on port <strong id="modal-proxy-port">8080</strong>. You can route traffic from this Mac or any device.</p>
+        <div class="step-card">
+          <div class="card-num">A</div>
+          <div class="card-body">
+            <div class="card-title">This Mac — one click</div>
+            <div class="card-desc">Go to <strong>Setup &amp; Certs → This Mac</strong> and click <strong>Enable for This Mac</strong>. All browser and app traffic will be intercepted instantly. Disable with one click when done.</div>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="card-num">B</div>
+          <div class="card-body">
+            <div class="card-title">iPhone / iPad</div>
+            <div class="card-desc">Go to <strong>Setup &amp; Certs → iOS / iPadOS</strong> for a step-by-step guide with a QR code to install the cert on your phone — no typing required.</div>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="card-num">C</div>
+          <div class="card-body">
+            <div class="card-title">Terminal / CLI tools</div>
+            <div class="card-desc">Most CLI tools respect env vars. Prefix any command or set for the session:</div>
+            <pre id="env-cmd">https_proxy=http://127.0.0.1:8080 curl -s https://api.example.com<button class="copy-btn" onclick="copyCode('env-cmd', this)">Copy</button></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Slide 4 — You're ready -->
+      <div class="modal-slide" id="slide-3">
+        <span class="slide-icon">🎉</span>
+        <h2>You're all set</h2>
+        <p class="subtitle">Once traffic starts flowing, here's what you can do:</p>
+        <div class="step-card">
+          <div class="card-num">1</div>
+          <div class="card-body">
+            <div class="card-title">Watch traffic in real time</div>
+            <div class="card-desc">The <strong>Traffic</strong> tab shows every request live — click any row to inspect headers and bodies.</div>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="card-num">2</div>
+          <div class="card-body">
+            <div class="card-title">Select captures and export to Claude</div>
+            <div class="card-desc">Check the boxes next to interesting requests, go to <strong>Export for Claude</strong>, choose a mode (API docs, auth extraction, full detail), and copy the output straight into Claude.</div>
+          </div>
+        </div>
+        <div class="step-card">
+          <div class="card-num">3</div>
+          <div class="card-body">
+            <div class="card-title">Use /intercept in Claude Code</div>
+            <div class="card-desc">In any Claude Code session, type <code>/intercept</code> to get AI-assisted capture management, analysis, and export — all from the terminal.</div>
+          </div>
+        </div>
+        <div class="modal-warning">
+          <strong>Remember:</strong> Disable the proxy when you're done (<strong>Setup &amp; Certs → Disable</strong>). Leaving it on with the proxy stopped will break your network connection.
+        </div>
+      </div>
+
+    </div><!-- /modal-slides -->
+
+    <div class="modal-footer">
+      <div class="modal-dots">
+        <div class="modal-dot active" id="dot-0"></div>
+        <div class="modal-dot" id="dot-1"></div>
+        <div class="modal-dot" id="dot-2"></div>
+        <div class="modal-dot" id="dot-3"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-lg ghost" id="modal-back-btn" onclick="modalBack()" style="display:none">Back</button>
+        <button class="btn-lg ghost" id="modal-skip-btn" onclick="dismissWelcome()">Skip</button>
+        <button class="btn-lg primary" id="modal-next-btn" onclick="modalNext()">Get Started →</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let captures = [];
+let selectedId = null;
+let selectedCaptures = new Set();
+let exportMode = 'api-docs';
+let ws = null;
+let inspectorTab = 'req-headers';
+let inspectorCapture = null;
+let PROXY_PORT = 7777;
+let LAN_IP = null;
+let TAILSCALE_IP = null;
+let capturePaused = false;
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  ws = new WebSocket(`ws://${location.host}`);
+  ws.onopen = () => {
+    document.getElementById('status-dot').classList.remove('offline');
+    document.getElementById('status-dot').classList.add('live');
+    document.getElementById('status-text').textContent = 'Live';
+  };
+  ws.onclose = () => {
+    document.getElementById('status-dot').classList.remove('live');
+    document.getElementById('status-dot').classList.add('offline');
+    document.getElementById('status-text').textContent = 'Reconnecting…';
+    setTimeout(connectWS, 2000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'capture') {
+      addCapture(msg.data);
+    } else if (msg.type === 'stats') {
+      updateStats(msg.data);
+    } else if (msg.type === 'cleared') {
+      captures = []; selectedId = null; selectedCaptures.clear(); inspectorCapture = null;
+      renderList(); showInspectorEmpty(); updateSelCount(); applyFilters();
+    } else if (msg.type === 'deleted') {
+      const ids = new Set(msg.data.ids);
+      captures = captures.filter(c => !ids.has(c.id));
+      ids.forEach(id => selectedCaptures.delete(id));
+      renderList(); updateSelCount(); applyFilters();
+    } else if (msg.type === 'capturePaused') {
+      capturePaused = true; updatePauseBtn();
+    } else if (msg.type === 'captureResumed') {
+      capturePaused = false; updatePauseBtn();
+    } else if (msg.type === 'sysProxyChanged') {
+      refreshLocalProxyStatus();
+    }
+  };
+}
+
+// ── Welcome modal ─────────────────────────────────────────────────────────────
+const TOTAL_SLIDES = 4;
+let currentSlide = 0;
+
+function showWelcomeIfNeeded() {
+  if (localStorage.getItem('ci-welcomed')) return;
+  const backdrop = document.getElementById('welcome-backdrop');
+  backdrop.style.display = 'flex';
+  // Trigger animation on next frame
+  requestAnimationFrame(() => requestAnimationFrame(() => backdrop.classList.add('visible')));
+}
+
+function dismissWelcome() {
+  localStorage.setItem('ci-welcomed', '1');
+  const backdrop = document.getElementById('welcome-backdrop');
+  backdrop.classList.remove('visible');
+  setTimeout(() => { backdrop.style.display = 'none'; }, 300);
+}
+
+function modalNext() {
+  if (currentSlide < TOTAL_SLIDES - 1) {
+    goToSlide(currentSlide + 1);
+  } else {
+    dismissWelcome();
+    // Drop the user straight onto the Setup tab
+    const setupBtn = document.querySelector('nav button:nth-child(3)');
+    if (setupBtn) showTab('setup', setupBtn);
+  }
+}
+
+function modalBack() {
+  if (currentSlide > 0) goToSlide(currentSlide - 1);
+}
+
+function goToSlide(n) {
+  document.getElementById(`slide-${currentSlide}`).classList.remove('active');
+  document.getElementById(`dot-${currentSlide}`).classList.remove('active');
+  currentSlide = n;
+  document.getElementById(`slide-${currentSlide}`).classList.add('active');
+  document.getElementById(`dot-${currentSlide}`).classList.add('active');
+
+  const pct = ((currentSlide + 1) / TOTAL_SLIDES) * 100;
+  document.getElementById('modal-progress-fill').style.width = pct + '%';
+
+  const isLast = currentSlide === TOTAL_SLIDES - 1;
+  const isFirst = currentSlide === 0;
+  document.getElementById('modal-next-btn').textContent = isLast ? 'Go to Setup →' : 'Next →';
+  document.getElementById('modal-back-btn').style.display = isFirst ? 'none' : '';
+  document.getElementById('modal-skip-btn').style.display = isLast ? 'none' : '';
+}
+
+function copyCode(preId, btn) {
+  const pre = document.getElementById(preId);
+  // Get text without the copy button text
+  const text = pre.childNodes[0].textContent.trim();
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+async function init() {
+  showWelcomeIfNeeded();
+
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+    PROXY_PORT = data.proxy.port;
+    LAN_IP = data.lanIp;
+    TAILSCALE_IP = data.tailscaleIp || null;
+    document.getElementById('proxy-port-label').textContent = `:${PROXY_PORT}`;
+    document.getElementById('modal-proxy-port').textContent = PROXY_PORT;
+    // Update cert command with actual port
+    const envCmd = document.getElementById('env-cmd');
+    if (envCmd) envCmd.childNodes[0].textContent =
+      `https_proxy=http://127.0.0.1:${PROXY_PORT} curl -s https://api.example.com`;
+    updateStats(data.stats);
+    renderIPBar(data);
+  } catch {}
+
+  try {
+    const res = await fetch('/api/captures?limit=200');
+    const data = await res.json();
+    captures = data.rows.reverse();
+    renderList();
+    applyFilters();
+    refreshDeviceFilter();
+  } catch {}
+
+  try {
+    const res = await fetch('/api/capture/state');
+    const data = await res.json();
+    capturePaused = data.paused;
+    updatePauseBtn();
+  } catch {}
+
+  connectWS();
+  showPlatform('this-mac', document.querySelector('.platform-btn.active'));
+}
+
+function renderIPBar(data) {
+  const bar = document.getElementById('ip-info-bar');
+  let html = '';
+  if (data.lanIp && data.lanIp !== '127.0.0.1') {
+    html += `<div class="ip-chip">
+      <span class="label">Wi-Fi / LAN</span>
+      <span class="value">${escHtml(data.lanIp)}</span>
+    </div>`;
+  }
+  if (data.tailscaleIp) {
+    html += `<div class="ip-chip tailscale">
+      <span class="label">Tailscale</span>
+      <span class="value">${escHtml(data.tailscaleIp)}</span>
+    </div>`;
+  }
+  html += `<div class="ip-chip">
+    <span class="label">Proxy Port</span>
+    <span class="value">${PROXY_PORT}</span>
+  </div>`;
+  bar.innerHTML = html || '<div style="color:var(--text3);font-size:12px">No network interfaces detected</div>';
+}
+
+function updateStats(s) {
+  if (!s) return;
+  document.getElementById('stat-total').textContent = `${s.total} req`;
+  document.getElementById('stat-hosts').textContent = `${s.hosts} hosts`;
+}
+
+// ── Captures ──────────────────────────────────────────────────────────────────
+function addCapture(c) {
+  captures.unshift(c);
+  if (captures.length > 2000) captures.pop();
+  prependRow(c);
+  updateStats({ total: captures.length, hosts: new Set(captures.map(x => x.host)).size });
+  refreshDeviceFilter();
+}
+
+function renderList() {
+  const list = document.getElementById('traffic-list');
+  const filtered = getFiltered();
+  if (!captures.length) {
+    list.innerHTML = `<div class="empty-state"><div class="label">No traffic yet</div><div class="hint">Set up your proxy in the <strong>Setup &amp; Certs</strong> tab, then browse.</div></div>`;
+    return;
+  }
+  if (!filtered.length) {
+    list.innerHTML = `<div class="empty-state"><div class="label">No matches</div><div class="hint">Try adjusting your filters.</div></div>`;
+    return;
+  }
+  list.innerHTML = filtered.map(rowHTML).join('');
+}
+
+function prependRow(c) {
+  const list = document.getElementById('traffic-list');
+  const emptyEl = list.querySelector('.empty-state');
+  if (emptyEl) list.innerHTML = '';
+  const filtered = getFiltered([c]);
+  if (!filtered.length) return;
+  const div = document.createElement('div');
+  div.innerHTML = rowHTML(c);
+  list.prepend(div.firstChild);
+}
+
+function deviceBadge(label) {
+  if (!label || label === 'This Mac') return '';
+  const cls = (label === 'iPhone' || label === 'iPad') ? ' mobile'
+            : label === 'Android' ? ' android' : '';
+  return `<span class="device-badge${cls}">${escHtml(label)}</span>`;
+}
+
+function rowHTML(c) {
+  const method = c.method || 'GET';
+  const status = c.responseStatus || 0;
+  const statusClass = status >= 500 ? 's-5xx' : status >= 400 ? 's-4xx' : status >= 300 ? 's-3xx' : status >= 200 ? 's-2xx' : 's-0';
+  const sel = selectedId === c.id ? ' selected' : '';
+  const checked = selectedCaptures.has(c.id) ? ' checked' : '';
+  const dur = c.duration ? `${c.duration}ms` : '';
+  let pathStr = c.path || '/';
+  if (pathStr.length > 60) pathStr = pathStr.slice(0, 60) + '…';
+  const ts = c.timestamp ? new Date(c.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+  return `<div class="capture-row${sel}" data-id="${c.id}" onclick="selectCapture(${c.id}, event)">
+    <input type="checkbox" class="capture-checkbox" ${checked} onclick="toggleSelect(${c.id}, event)">
+    <span class="method-badge method-${method}">${method}</span>
+    <span class="status-badge ${statusClass}">${status || '—'}</span>
+    <span class="capture-url"><span class="host">${escHtml(c.host)}</span>${escHtml(pathStr)}</span>
+    ${deviceBadge(c.clientLabel)}
+    <span class="capture-meta" style="display:flex;flex-direction:column;align-items:flex-end;gap:1px">
+      <span>${dur}</span>
+      <span style="font-size:9px;color:var(--text3)">${ts}</span>
+    </span>
+  </div>`;
+}
+
+function getFiltered(pool) {
+  const list = pool || captures;
+  const search = document.getElementById('f-search')?.value.toLowerCase() || '';
+  const host   = document.getElementById('f-host')?.value.toLowerCase() || '';
+  const method = document.getElementById('f-method')?.value || '';
+  const status = document.getElementById('f-status')?.value || '';
+  const device = document.getElementById('f-device')?.value || '';
+  return list.filter(c => {
+    if (search && !c.url?.toLowerCase().includes(search)) return false;
+    if (host   && !c.host?.toLowerCase().includes(host))   return false;
+    if (method && c.method !== method) return false;
+    if (device && c.clientLabel !== device) return false;
+    if (status) {
+      const s = c.responseStatus || 0;
+      if (status === '2xx' && (s < 200 || s > 299)) return false;
+      if (status === '3xx' && (s < 300 || s > 399)) return false;
+      if (status === '4xx' && (s < 400 || s > 499)) return false;
+      if (status === '5xx' && (s < 500 || s > 599)) return false;
+    }
+    return true;
+  });
+}
+
+function applyFilters() {
+  renderList();
+  refreshDeviceFilter();
+  // Show "Select Filtered" only when a filter is actually active
+  const hasFilter = document.getElementById('f-search').value ||
+                    document.getElementById('f-host').value ||
+                    document.getElementById('f-method').value ||
+                    document.getElementById('f-status').value ||
+                    document.getElementById('f-device').value;
+  document.getElementById('btn-sel-filtered').style.display = hasFilter ? '' : 'none';
+  // Update match count
+  const filtered = getFiltered();
+  const countEl = document.getElementById('filter-match-count');
+  countEl.textContent = hasFilter ? `${filtered.length} of ${captures.length} shown` : `${captures.length} requests`;
+}
+
+function refreshDeviceFilter() {
+  const sel = document.getElementById('f-device');
+  if (!sel) return;
+  const current = sel.value;
+  const labels = [...new Set(captures.map(c => c.clientLabel).filter(Boolean))].sort();
+  // Rebuild options
+  sel.innerHTML = '<option value="">All Devices</option>' +
+    labels.map(l => `<option value="${escHtml(l)}"${l === current ? ' selected' : ''}>${escHtml(l)}</option>`).join('');
+  // Hide dropdown entirely if only one device type
+  sel.style.display = labels.length <= 1 ? 'none' : '';
+}
+
+// ── Selection ─────────────────────────────────────────────────────────────────
+async function selectCapture(id, e) {
+  if (e.target.type === 'checkbox') return;
+  selectedId = id;
+  document.querySelectorAll('.capture-row').forEach(r => r.classList.toggle('selected', Number(r.dataset.id) === id));
+  // Show skeleton while loading
+  document.getElementById('inspector').innerHTML = `<div class="inspector-empty"><div style="color:var(--text3);font-size:12px">Loading…</div></div>`;
+  const c = await fetchCapture(id);
+  if (c) {
+    inspectorCapture = c;
+    // Update local captures cache with full data
+    const idx = captures.findIndex(x => x.id === id);
+    if (idx !== -1) captures[idx] = { ...captures[idx], ...c };
+    renderInspector(c);
+  }
+}
+
+function toggleSelect(id, e) {
+  e.stopPropagation();
+  if (selectedCaptures.has(id)) selectedCaptures.delete(id);
+  else selectedCaptures.add(id);
+  updateSelCount();
+}
+
+function clearSelection() {
+  selectedCaptures.clear();
+  document.querySelectorAll('.capture-checkbox').forEach(cb => cb.checked = false);
+  updateSelCount();
+}
+
+function updateSelCount() {
+  const n = selectedCaptures.size;
+  document.getElementById('sel-count').textContent = n > 0 ? `${n} selected` : '';
+  document.getElementById('btn-deselect').style.display = n > 0 ? '' : 'none';
+  document.getElementById('btn-export-sel').style.display = n > 0 ? '' : 'none';
+  document.getElementById('btn-delete-sel').style.display = n > 0 ? '' : 'none';
+  // Update checkboxes in list
+  document.querySelectorAll('.capture-checkbox').forEach(cb => {
+    cb.checked = selectedCaptures.has(Number(cb.closest('.capture-row').dataset.id));
+  });
+}
+
+function selectAll() {
+  captures.forEach(c => selectedCaptures.add(c.id));
+  updateSelCount();
+}
+
+function selectFiltered() {
+  getFiltered().forEach(c => selectedCaptures.add(c.id));
+  updateSelCount();
+}
+
+async function deleteSelected() {
+  if (!selectedCaptures.size) return;
+  const ids = [...selectedCaptures];
+  if (!confirm(`Delete ${ids.length} selected capture${ids.length > 1 ? 's' : ''}?`)) return;
+  await fetch('/api/captures/batch', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  // Remove from local array and clear selection
+  ids.forEach(id => {
+    const idx = captures.findIndex(c => c.id === id);
+    if (idx !== -1) captures.splice(idx, 1);
+  });
+  selectedCaptures.clear();
+  if (inspectorCapture && ids.includes(inspectorCapture.id)) {
+    inspectorCapture = null;
+    showInspectorEmpty();
+  }
+  updateSelCount();
+  applyFilters();
+}
+
+function exportSelected() {
+  const exportBtn = document.querySelector('#main-nav button:nth-child(2)');
+  showTab('export', exportBtn);
+}
+
+// ── Pause / Resume ────────────────────────────────────────────────────────────
+async function togglePause() {
+  const endpoint = capturePaused ? '/api/capture/resume' : '/api/capture/pause';
+  await fetch(endpoint, { method: 'POST' });
+  // State updated via WebSocket broadcast
+}
+
+function updatePauseBtn() {
+  const btn = document.getElementById('btn-pause');
+  const lbl = document.getElementById('pause-label');
+  if (!btn || !lbl) return;
+  if (capturePaused) {
+    btn.className = 'rec-btn paused';
+    lbl.textContent = 'Paused';
+    btn.title = 'Click to resume capturing';
+  } else {
+    btn.className = 'rec-btn recording';
+    lbl.textContent = 'Recording';
+    btn.title = 'Click to pause capturing';
+  }
+}
+
+async function fetchCapture(id) {
+  // Always fetch full record from API — local cache only has preview fields
+  try { return await (await fetch(`/api/captures/${id}`)).json(); } catch { return null; }
+}
+
+// ── Inspector ─────────────────────────────────────────────────────────────────
+function showInspectorEmpty() {
+  document.getElementById('inspector').innerHTML = `<div class="inspector-empty">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+    </svg>
+    <div>Select a request to inspect</div>
+  </div>`;
+}
+
+function renderInspector(c) {
+  const status = c.responseStatus || 0;
+  const statusClass = status >= 500 ? 's-5xx' : status >= 400 ? 's-4xx' : status >= 300 ? 's-3xx' : status >= 200 ? 's-2xx' : 's-0';
+  const reqHeaders = c.requestHeaders || {};
+  const authTags = [];
+  const authH = reqHeaders['authorization'] || reqHeaders['Authorization'] || '';
+  if (authH) authTags.push(`<span class="auth-tag">${escHtml(authH.split(' ')[0])} token</span>`);
+  const cookie = reqHeaders['cookie'] || reqHeaders['Cookie'] || '';
+  if (cookie) authTags.push('<span class="auth-tag">Cookie</span>');
+
+  document.getElementById('inspector').innerHTML = `
+    <div class="inspector-header">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <span class="method-badge method-${c.method}">${c.method}</span>
+        <span class="status-badge ${statusClass}">${status || '—'}</span>
+        ${authTags.join('')}
+      </div>
+      <div class="url-line">${escHtml(c.url || '')}</div>
+      <div class="meta-line">
+        <span>${c.duration ? c.duration + 'ms' : ''}</span>
+        <span>${escHtml(c.contentType?.split(';')[0] || '')}</span>
+        <span>${c.timestamp ? new Date(c.timestamp).toLocaleTimeString() : ''}</span>
+        ${c.clientLabel ? `<span style="color:var(--text3)">from ${escHtml(c.clientLabel)}</span>` : ''}
+      </div>
+    </div>
+    <div class="inspector-tabs">
+      <button class="${inspectorTab==='req-headers'?'active':''}" onclick="switchInspTab('req-headers',this)">Req Headers</button>
+      <button class="${inspectorTab==='req-body'?'active':''}" onclick="switchInspTab('req-body',this)">Req Body</button>
+      <button class="${inspectorTab==='res-headers'?'active':''}" onclick="switchInspTab('res-headers',this)">Res Headers</button>
+      <button class="${inspectorTab==='res-body'?'active':''}" onclick="switchInspTab('res-body',this)">Res Body</button>
+    </div>
+    <div class="inspector-body" id="insp-body">${renderInspBody(c, inspectorTab)}</div>`;
+}
+
+function switchInspTab(tab, btn) {
+  inspectorTab = tab;
+  document.querySelectorAll('.inspector-tabs button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  if (!inspectorCapture) return;
+  document.getElementById('insp-body').innerHTML = renderInspBody(inspectorCapture, tab);
+}
+
+function renderInspBody(c, tab) {
+  if (tab === 'req-headers') return headersTable(c.requestHeaders || {});
+  if (tab === 'res-headers') return headersTable(c.responseHeaders || {});
+  if (tab === 'req-body')    return bodyContent(c.requestBody);
+  if (tab === 'res-body')    return bodyContent(c.responseBody, c.contentType);
+  return '';
+}
+
+function headersTable(headers) {
+  const entries = Object.entries(headers);
+  if (!entries.length) return '<span style="color:var(--text3)">No headers</span>';
+  return `<table class="headers-table">${entries.map(([k,v]) =>
+    `<tr><td>${escHtml(k)}</td><td>${escHtml(String(v))}</td></tr>`).join('')}</table>`;
+}
+
+function bodyContent(body, contentType = '') {
+  if (!body) return '<span style="color:var(--text3)">Empty body</span>';
+  let formatted = body;
+  if (contentType.includes('json') || body.trimStart().startsWith('{') || body.trimStart().startsWith('[')) {
+    try { formatted = JSON.stringify(JSON.parse(body), null, 2); } catch {}
+  }
+  return `<pre class="body-content">${escHtml(formatted)}</pre>`;
+}
+
+// ── Export ────────────────────────────────────────────────────────────────────
+function selectExportMode(el) {
+  document.querySelectorAll('.export-option').forEach(e => e.classList.remove('selected'));
+  el.classList.add('selected');
+  exportMode = el.dataset.mode;
+}
+
+async function generateExport() {
+  const ids = [...selectedCaptures].join(',');
+  const url = ids ? `/api/analyze?ids=${ids}&mode=${exportMode}` : `/api/analyze?mode=${exportMode}&limit=100`;
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+    document.getElementById('export-output').textContent = data.error ? 'Error: ' + data.error : data.output;
+    document.getElementById('export-info').textContent = data.count ? `${data.count} captures` : '';
+  } catch (e) {
+    document.getElementById('export-output').textContent = 'Failed: ' + e.message;
+  }
+}
+
+async function copyExport() {
+  const text = document.getElementById('export-output').textContent;
+  if (text && text !== 'Click "Generate Export" to build output…') {
+    await navigator.clipboard.writeText(text);
+    document.getElementById('export-info').textContent = 'Copied!';
+    setTimeout(() => document.getElementById('export-info').textContent = '', 2000);
+  }
+}
+
+async function clearCaptures() {
+  if (!confirm('Clear all captures?')) return;
+  await fetch('/api/captures', { method: 'DELETE' });
+}
+
+// ── Setup — system proxy toggle ───────────────────────────────────────────────
+async function refreshLocalProxyStatus() {
+  try {
+    const res = await fetch('/api/proxy/status');
+    const data = await res.json();
+    const services = data.services || [];
+    const active   = services.find(s => s.pointsHere);
+    const anyOn    = services.some(s => s.httpEnabled || s.httpsEnabled);
+    const statusEl = document.getElementById('local-proxy-status');
+    const btnOn    = document.getElementById('btn-proxy-on');
+    const btnOff   = document.getElementById('btn-proxy-off');
+
+    if (active) {
+      statusEl.innerHTML = `<span style="color:var(--s2xx)">● Active</span> — routing through 127.0.0.1:${active.port} on ${active.service}`;
+      btnOn.style.display  = 'none';
+      btnOff.style.display = '';
+    } else if (anyOn) {
+      const other = services.find(s => s.httpEnabled);
+      statusEl.innerHTML = `<span style="color:var(--put)">● Proxy on</span> — but pointing to ${other?.server}:${other?.port}. Click enable to redirect.`;
+      btnOn.style.display = btnOff.style.display = '';
+    } else {
+      statusEl.innerHTML = `<span style="color:var(--text3)">○ Off</span> — direct connections`;
+      btnOn.style.display  = '';
+      btnOff.style.display = 'none';
+    }
+  } catch {
+    document.getElementById('local-proxy-status').textContent = 'Unable to check status';
+  }
+}
+
+async function setLocalProxy(enable) {
+  const btnOn = document.getElementById('btn-proxy-on');
+  const btnOff = document.getElementById('btn-proxy-off');
+  btnOn.disabled = btnOff.disabled = true;
+  try {
+    await fetch(enable ? '/api/proxy/on' : '/api/proxy/off', { method: 'POST' });
+    await refreshLocalProxyStatus();
+  } catch (e) {
+    document.getElementById('local-proxy-status').textContent = 'Failed: ' + e.message;
+  } finally {
+    btnOn.disabled = btnOff.disabled = false;
+  }
+}
+
+// ── Setup — platform instructions ────────────────────────────────────────────
+const qrCache = {};
+
+async function getQR(url) {
+  if (qrCache[url]) return qrCache[url];
+  try {
+    const res = await fetch(`/api/qr?url=${encodeURIComponent(url)}`);
+    const data = await res.json();
+    qrCache[url] = data.dataUrl;
+    return data.dataUrl;
+  } catch { return null; }
+}
+
+async function showPlatform(platform, btn) {
+  document.querySelectorAll('.platform-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const el = document.getElementById('setup-instructions');
+  el.innerHTML = '<div style="padding:20px;color:var(--text2)">Loading…</div>';
+
+  try {
+    const res = await fetch(`/api/setup/${platform}`);
+    const data = await res.json();
+
+    // Top warning banner (iOS / Android)
+    const warningHtml = data.topWarning
+      ? `<div style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.35);border-radius:var(--radius);padding:11px 16px;font-size:12px;color:#f47067;line-height:1.6;margin-bottom:2px">${data.topWarning}</div>`
+      : '';
+
+    // Render steps — QR codes load async after
+    el.innerHTML = warningHtml + data.steps.map((s, i) => {
+      const isWarning = s.warning;
+      const stepStyle = isWarning
+        ? 'border-left:3px solid rgba(248,81,73,.6);background:rgba(248,81,73,.05)'
+        : '';
+      const numStyle = isWarning
+        ? 'background:rgba(248,81,73,.2);border-color:rgba(248,81,73,.6);color:#f47067'
+        : '';
+      const titleStyle = isWarning ? 'color:#f47067' : '';
+      return `<div class="setup-step" id="step-${i}" style="${stepStyle}">
+        <div class="step-num" style="${numStyle}">${i + 1}</div>
+        <div class="step-body">
+          <h4 style="${titleStyle}">${escHtml(s.title)}</h4>
+          ${s.html ? `<p>${s.html}</p>` : ''}
+          ${s.code ? `<pre>${escHtml(s.code)}</pre>` : ''}
+          ${s.qrUrl ? `<div class="qr-section" id="qr-${i}"><div style="color:var(--text3);font-size:12px">Loading QR code…</div></div>` : ''}
+        </div>
+      </div>`;
+    }).join('');
+
+    // Load QR codes in parallel
+    const qrSteps = data.steps.map((s, i) => ({ s, i })).filter(({ s }) => s.qrUrl);
+    await Promise.all(qrSteps.map(async ({ s, i }) => {
+      const qrEl = document.getElementById(`qr-${i}`);
+      if (!qrEl) return;
+
+      const imgs = [];
+      const primary = await getQR(s.qrUrl);
+      if (primary) {
+        const label = s.qrUrlLabel || 'Wi-Fi';
+        imgs.push(`<div class="qr-block">
+          <img src="${escHtml(primary)}" width="160" height="160" alt="QR code">
+          <div class="qr-label">${escHtml(label)}</div>
+        </div>`);
+      }
+      if (s.qrUrlAlt) {
+        const alt = await getQR(s.qrUrlAlt);
+        if (alt) {
+          imgs.push(`<div class="qr-block">
+            <img src="${escHtml(alt)}" width="160" height="160" alt="Tailscale QR code">
+            <div class="qr-label tailscale">${escHtml(s.qrUrlAltLabel || 'Tailscale')}</div>
+          </div>`);
+        }
+      }
+      qrEl.innerHTML = imgs.join('') || '';
+    }));
+
+  } catch {
+    el.innerHTML = '<div style="padding:20px;color:var(--text3)">Failed to load instructions.</div>';
+  }
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function showTab(name, btn) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('#main-nav button').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+  if (name === 'setup') {
+    refreshLocalProxyStatus();
+    // Load default platform instructions if not already loaded
+    const el = document.getElementById('setup-instructions');
+    if (el && el.innerHTML.trim() === '') {
+      showPlatform('this-mac', document.querySelector('.platform-btn.active'));
+    }
+  }
+}
+
+// ── Util ──────────────────────────────────────────────────────────────────────
+function escHtml(str) {
+  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+init();
+</script>
+</body>
+</html>

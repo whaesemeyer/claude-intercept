@@ -1,0 +1,19 @@
+node_modules/
+
+# Generated at runtime — contain private keys and captured traffic
+captures/
+certs/
+
+*.log
+*.pid
+.DS_Store
+
+# Embergraph generated context (do not commit)
+.embergraph/
+settings.json
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
