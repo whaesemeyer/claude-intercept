@@ -42,6 +42,12 @@ function init() {
   try { db.exec("ALTER TABLE captures ADD COLUMN client_ip TEXT"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN client_label TEXT"); } catch {}
 
+  // Migration: encoding + wire-size columns (captured after decompression).
+  try { db.exec("ALTER TABLE captures ADD COLUMN response_encoding TEXT DEFAULT 'identity'"); } catch {}
+  try { db.exec("ALTER TABLE captures ADD COLUMN response_body_size INTEGER DEFAULT 0"); } catch {}
+  try { db.exec("ALTER TABLE captures ADD COLUMN request_encoding TEXT DEFAULT 'identity'"); } catch {}
+  try { db.exec("ALTER TABLE captures ADD COLUMN request_body_size INTEGER DEFAULT 0"); } catch {}
+
   return db;
 }
 
@@ -49,13 +55,13 @@ function insertCapture(capture) {
   const stmt = db.prepare(`
     INSERT INTO captures
       (timestamp, method, url, host, path,
-       request_headers, request_body,
-       response_status, response_headers, response_body,
+       request_headers, request_body, request_encoding, request_body_size,
+       response_status, response_headers, response_body, response_encoding, response_body_size,
        content_type, duration_ms, client_ip, client_label)
     VALUES
       ($timestamp, $method, $url, $host, $path,
-       $requestHeaders, $requestBody,
-       $responseStatus, $responseHeaders, $responseBody,
+       $requestHeaders, $requestBody, $requestEncoding, $requestBodySize,
+       $responseStatus, $responseHeaders, $responseBody, $responseEncoding, $responseBodySize,
        $contentType, $duration, $clientIp, $clientLabel)
   `);
 
@@ -67,9 +73,13 @@ function insertCapture(capture) {
     $path: capture.path,
     $requestHeaders: JSON.stringify(capture.requestHeaders || {}),
     $requestBody: capture.requestBody || '',
+    $requestEncoding: capture.requestEncoding || 'identity',
+    $requestBodySize: capture.requestBodySize || 0,
     $responseStatus: capture.responseStatus,
     $responseHeaders: JSON.stringify(capture.responseHeaders || {}),
     $responseBody: capture.responseBody || '',
+    $responseEncoding: capture.responseEncoding || 'identity',
+    $responseBodySize: capture.responseBodySize || 0,
     $contentType: capture.contentType || '',
     $duration: capture.duration || 0,
     $clientIp: capture.clientIp || '',
@@ -196,8 +206,12 @@ function parseRow(row) {
     path: row.path,
     requestHeaders: tryParse(row.request_headers, {}),
     requestBody: row.request_body,
+    requestEncoding: row.request_encoding || 'identity',
+    requestBodySize: Number(row.request_body_size || 0),
     responseHeaders: tryParse(row.response_headers, {}),
     responseBody: row.response_body,
+    responseEncoding: row.response_encoding || 'identity',
+    responseBodySize: Number(row.response_body_size || 0),
     responseStatus: row.response_status,
     contentType: row.content_type,
     duration: Number(row.duration_ms || 0),

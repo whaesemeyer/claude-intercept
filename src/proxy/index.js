@@ -6,9 +6,7 @@ const net = require('net');
 const tls = require('tls');
 const { URL } = require('url');
 const certManager = require('./cert_manager');
-
-// Max body size to capture (1MB)
-const MAX_BODY = 1024 * 1024;
+const { tryDecodeBody, MAX_BODY } = require('./body');
 
 function deriveDeviceLabel(ip, ua) {
   if (!ip || ip === '127.0.0.1' || ip === '::1') return 'This Mac';
@@ -20,29 +18,6 @@ function deriveDeviceLabel(ip, ua) {
   if (u.includes('windows')) return `Windows (${ip})`;
   if (u.includes('linux') && !u.includes('android')) return `Linux (${ip})`;
   return ip;
-}
-
-function tryDecodeBody(buffer, contentType = '') {
-  if (!buffer || buffer.length === 0) return '';
-  if (buffer.length > MAX_BODY) return `<binary ${buffer.length} bytes — truncated>`;
-
-  const ct = contentType.toLowerCase();
-  const isText =
-    ct.includes('json') ||
-    ct.includes('text') ||
-    ct.includes('xml') ||
-    ct.includes('javascript') ||
-    ct.includes('form') ||
-    ct.includes('graphql') ||
-    buffer.length < 4096; // short payloads: try text anyway
-
-  if (!isText) return `<binary ${buffer.length} bytes>`;
-
-  try {
-    return buffer.toString('utf8');
-  } catch {
-    return `<binary ${buffer.length} bytes>`;
-  }
 }
 
 function collectBody(stream) {
@@ -178,6 +153,14 @@ class ProxyServer {
           const duration = Date.now() - startMs;
           const resBody = Buffer.concat(resChunks);
           const contentType = proxyRes.headers['content-type'] || '';
+          const contentEncoding = proxyRes.headers['content-encoding'] || '';
+
+          const reqDecoded = tryDecodeBody(
+            reqBody,
+            req.headers['content-type'],
+            req.headers['content-encoding'] || '',
+          );
+          const resDecoded = tryDecodeBody(resBody, contentType, contentEncoding);
 
           const capture = {
             timestamp: Date.now(),
@@ -186,10 +169,14 @@ class ProxyServer {
             host,
             path,
             requestHeaders: req.headers,
-            requestBody: tryDecodeBody(reqBody, req.headers['content-type']),
+            requestBody: reqDecoded.text,
+            requestEncoding: reqDecoded.encoding,
+            requestBodySize: reqDecoded.originalSize,
             responseStatus: proxyRes.statusCode,
             responseHeaders: proxyRes.headers,
-            responseBody: tryDecodeBody(resBody, contentType),
+            responseBody: resDecoded.text,
+            responseEncoding: resDecoded.encoding,
+            responseBodySize: resDecoded.originalSize,
             contentType,
             duration,
             clientIp,
@@ -235,9 +222,13 @@ class ProxyServer {
       path: c.path,
       requestHeaders: c.requestHeaders,
       requestBodyPreview: typeof c.requestBody === 'string' ? c.requestBody.slice(0, 512) : '',
+      requestEncoding: c.requestEncoding || 'identity',
+      requestBodySize: c.requestBodySize || 0,
       responseStatus: c.responseStatus,
       responseHeaders: c.responseHeaders,
       responseBodyPreview: typeof c.responseBody === 'string' ? c.responseBody.slice(0, 512) : '',
+      responseEncoding: c.responseEncoding || 'identity',
+      responseBodySize: c.responseBodySize || 0,
       contentType: c.contentType,
       duration: c.duration,
       clientIp: c.clientIp,

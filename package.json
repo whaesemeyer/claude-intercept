@@ -12,7 +12,7 @@
     "setup": "node src/cli.js setup"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.15.0"
   },
   "dependencies": {
     "chalk": "^4.1.2",

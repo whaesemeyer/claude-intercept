@@ -1199,8 +1199,8 @@ function switchInspTab(tab, btn) {
 function renderInspBody(c, tab) {
   if (tab === 'req-headers') return headersTable(c.requestHeaders || {});
   if (tab === 'res-headers') return headersTable(c.responseHeaders || {});
-  if (tab === 'req-body')    return bodyContent(c.requestBody);
-  if (tab === 'res-body')    return bodyContent(c.responseBody, c.contentType);
+  if (tab === 'req-body')    return bodyContent(c.requestBody, '', c.requestEncoding, c.requestBodySize);
+  if (tab === 'res-body')    return bodyContent(c.responseBody, c.contentType, c.responseEncoding, c.responseBodySize);
   return '';
 }
 
@@ -1211,13 +1211,30 @@ function headersTable(headers) {
     `<tr><td>${escHtml(k)}</td><td>${escHtml(String(v))}</td></tr>`).join('')}</table>`;
 }
 
-function bodyContent(body, contentType = '') {
-  if (!body) return '<span style="color:var(--text3)">Empty body</span>';
+function formatBytes(n) {
+  if (!n) return '0 B';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
+}
+
+function encodingBadge(encoding, wireSize) {
+  const enc = encoding || 'identity';
+  const bits = [];
+  if (enc !== 'identity') bits.push(`Content-Encoding: ${escHtml(enc)} (decoded)`);
+  if (wireSize) bits.push(`Wire: ${formatBytes(wireSize)}`);
+  if (!bits.length) return '';
+  return `<div style="color:var(--text3);font-size:11px;margin-bottom:6px">${bits.join(' · ')}</div>`;
+}
+
+function bodyContent(body, contentType = '', encoding = 'identity', wireSize = 0) {
+  const badge = encodingBadge(encoding, wireSize);
+  if (!body) return `${badge}<span style="color:var(--text3)">Empty body</span>`;
   let formatted = body;
   if (contentType.includes('json') || body.trimStart().startsWith('{') || body.trimStart().startsWith('[')) {
     try { formatted = JSON.stringify(JSON.parse(body), null, 2); } catch {}
   }
-  return `<pre class="body-content">${escHtml(formatted)}</pre>`;
+  return `${badge}<pre class="body-content">${escHtml(formatted)}</pre>`;
 }
 
 // ── Export ────────────────────────────────────────────────────────────────────
