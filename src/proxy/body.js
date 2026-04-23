@@ -70,10 +70,17 @@ function tryDecodeBody(buffer, contentType = '', contentEncoding = '') {
     };
   }
 
-  try {
-    const text = decoded.toString('utf8');
+  if (decompressError) {
     return {
-      text: decompressError ? `<decompress failed: ${decompressError}>\n${text}` : text,
+      text: `<decompress failed: ${decompressError}> <${originalSize} compressed bytes>`,
+      encoding: enc || 'identity',
+      originalSize,
+    };
+  }
+
+  try {
+    return {
+      text: decoded.toString('utf8'),
       encoding: enc || 'identity',
       originalSize,
     };

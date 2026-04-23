@@ -65,17 +65,22 @@ test('case-insensitive encoding header', () => {
   assert.strictEqual(r.encoding, 'gzip');
 });
 
-test('corrupt gzip falls back with error prefix', () => {
+test('corrupt gzip falls back with error prefix and no mojibake tail', () => {
   // Valid gzip magic but truncated — gunzipSync will throw.
   const corrupt = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0xff, 0xff, 0x00]);
   const r = tryDecodeBody(corrupt, 'application/json', 'gzip');
-  assert.match(r.text, /^<decompress failed/);
+  assert.match(r.text, /^<decompress failed: .+> <\d+ compressed bytes>$/);
+  assert.strictEqual(r.encoding, 'gzip');
+  assert.strictEqual(r.originalSize, corrupt.length);
 });
 
-test('unknown encoding falls back with error prefix', () => {
+test('unknown encoding falls back with error prefix and no mojibake tail', () => {
   const buf = Buffer.from(json);
   const r = tryDecodeBody(buf, 'application/json', 'snappy');
-  assert.match(r.text, /^<decompress failed: unknown encoding snappy>/);
+  assert.strictEqual(
+    r.text,
+    `<decompress failed: unknown encoding snappy> <${buf.length} compressed bytes>`,
+  );
 });
 
 test('large binary image stays marked as binary', () => {
