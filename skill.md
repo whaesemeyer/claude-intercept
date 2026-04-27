@@ -141,6 +141,6 @@ When analyzing captured API traffic, look for:
 5. **Versioning** — `/v1/`, `/v2/`, header-based versioning
 6. **Error patterns** — 4xx/5xx error shapes, error codes and messages
 7. **JWT tokens** — decode headers and payloads to understand claims and expiry
-8. **WebSocket upgrades** — note Upgrade headers (not currently captured by proxy)
+8. **WebSocket upgrades** — `Upgrade: websocket` requests are tunneled through transparently and logged as `method=WS` capture rows (host + path + duration). Frame contents are not parsed yet.
 9. **CORS** — Access-Control-* headers revealing allowed origins
 10. **Pagination** — cursor/offset/page patterns in requests and responses

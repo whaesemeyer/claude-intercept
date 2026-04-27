@@ -47,6 +47,7 @@ class ProxyServer {
 
     // Handles HTTPS after TLS unwrapping — all CONNECT tunnels land here
     this._httpsHandler = new http.Server((req, res) => this._handleHTTPS(req, res));
+    this._httpsHandler.on('upgrade', (req, socket, head) => this._handleWebSocketUpgrade(req, socket, head));
     this._httpsHandler.on('error', () => {}); // suppress
   }
 
@@ -114,6 +115,110 @@ class ProxyServer {
     const port = socket._interceptPort || 443;
 
     await this._forward({ req, res, host, port, path: req.url, isHttps: true });
+  }
+
+  // ── WebSocket upgrade (wss://) — transparent tunnel + connection log ──────
+  //
+  // Cert-pinned single-page apps (Spotify web, Discord) require a working
+  // WebSocket upgrade or they hang at the loading state. Node's http.Server
+  // emits 'upgrade' instead of 'request' when a client sends Upgrade: websocket.
+  // We can't decrypt frames here without a full RFC 6455 parser; for now we
+  // forward bytes verbatim and log a single capture row per connection so the
+  // dashboard shows the WS happened.
+
+  _handleWebSocketUpgrade(req, clientSocket, head) {
+    const tlsSocket = req.socket;
+    const host = tlsSocket._interceptHost || req.headers.host?.split(':')[0] || 'unknown';
+    const port = tlsSocket._interceptPort || 443;
+    const startMs = Date.now();
+    const rawIp = clientSocket.remoteAddress || '';
+    const clientIp = rawIp.replace(/^::ffff:/, '');
+    const clientLabel = deriveDeviceLabel(clientIp, req.headers['user-agent']);
+
+    let logged = false;
+    const finalize = (status) => {
+      if (logged || this.paused) return;
+      logged = true;
+      const duration = Date.now() - startMs;
+      const capture = {
+        timestamp: startMs,
+        method: 'WS',
+        url: `wss://${host}${req.url}`,
+        host,
+        path: req.url,
+        requestHeaders: req.headers,
+        requestBody: '',
+        requestEncoding: 'identity',
+        requestBodySize: 0,
+        responseStatus: status,
+        responseHeaders: {},
+        responseBody: `[WebSocket — duration ${duration}ms]`,
+        responseEncoding: 'identity',
+        responseBodySize: 0,
+        contentType: 'websocket',
+        duration,
+        clientIp,
+        clientLabel,
+      };
+      try {
+        const id = this.db.insertCapture(capture);
+        capture.id = id;
+        this.broadcast({ type: 'capture', data: this._serializeCapture(capture) });
+      } catch (err) {
+        console.error('[proxy] WS capture error:', err.message);
+      }
+    };
+
+    // Force HTTP/1.1 — WebSocket-over-HTTP/2 (RFC 8441) is a separate path
+    // most servers don't enable, and the Upgrade header semantics only work
+    // over h1.
+    const upstream = tls.connect({
+      host,
+      port,
+      servername: host,
+      rejectUnauthorized: false,
+      ALPNProtocols: ['http/1.1'],
+    });
+
+    const cleanup = (status) => {
+      finalize(status);
+      try { upstream.destroy(); } catch {}
+      try { clientSocket.destroy(); } catch {}
+    };
+
+    // Disable Nagle so small WS control frames flush immediately.
+    try { clientSocket.setNoDelay?.(true); } catch {}
+
+    upstream.on('error', () => cleanup(0));
+    clientSocket.on('error', () => cleanup(0));
+    clientSocket.on('close', () => cleanup(101));
+    upstream.on('close', () => cleanup(101));
+
+    upstream.once('secureConnect', () => {
+      try { upstream.setNoDelay?.(true); } catch {}
+
+      const reqLine = `${req.method} ${req.url} HTTP/1.1\r\n`;
+      const headerBlock = Object.entries(req.headers)
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+        .join('\r\n');
+      try {
+        upstream.write(reqLine + headerBlock + '\r\n\r\n');
+        if (head && head.length > 0) upstream.write(head);
+      } catch {
+        return cleanup(0);
+      }
+
+      // Manual data shuttle (instead of stream.pipe). pipe()'s default
+      // end-on-end behavior turns one side's FIN into a write-side close
+      // on the other, which on TLSSocket pairs has been observed to
+      // truncate WS frames mid-flight.
+      upstream.on('data', (chunk) => {
+        try { clientSocket.write(chunk); } catch {}
+      });
+      clientSocket.on('data', (chunk) => {
+        try { upstream.write(chunk); } catch {}
+      });
+    });
   }
 
   // ── Shared forward + capture logic ───────────────────────────────────────
