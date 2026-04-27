@@ -186,12 +186,17 @@ class ProxyServer {
       try { clientSocket.destroy(); } catch {}
     };
 
+    // Disable Nagle so small WS control frames flush immediately.
+    try { clientSocket.setNoDelay?.(true); } catch {}
+
     upstream.on('error', () => cleanup(0));
     clientSocket.on('error', () => cleanup(0));
     clientSocket.on('close', () => cleanup(101));
     upstream.on('close', () => cleanup(101));
 
     upstream.once('secureConnect', () => {
+      try { upstream.setNoDelay?.(true); } catch {}
+
       const reqLine = `${req.method} ${req.url} HTTP/1.1\r\n`;
       const headerBlock = Object.entries(req.headers)
         .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
@@ -203,10 +208,16 @@ class ProxyServer {
         return cleanup(0);
       }
 
-      // Bidirectional pipe — upstream's 101 response and all subsequent WS
-      // frames flow straight through to the browser.
-      upstream.pipe(clientSocket);
-      clientSocket.pipe(upstream);
+      // Manual data shuttle (instead of stream.pipe). pipe()'s default
+      // end-on-end behavior turns one side's FIN into a write-side close
+      // on the other, which on TLSSocket pairs has been observed to
+      // truncate WS frames mid-flight.
+      upstream.on('data', (chunk) => {
+        try { clientSocket.write(chunk); } catch {}
+      });
+      clientSocket.on('data', (chunk) => {
+        try { upstream.write(chunk); } catch {}
+      });
     });
   }
 
