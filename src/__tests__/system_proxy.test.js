@@ -7,6 +7,7 @@ const {
   parseGsettingsValue,
   linuxStatusFromValues,
   kdeProxyConfigOps,
+  binExists,
 } = require('../system_proxy');
 
 test('linuxEnvLines returns the exact 5 export lines', () => {
@@ -63,6 +64,25 @@ test('linuxStatusFromValues — manual pointing here', () => {
   assert.strictEqual(s.pointsHere, true);
 });
 
+test('linuxStatusFromValues — service defaults to GNOME, KDE propagates', () => {
+  const def = linuxStatusFromValues({
+    mode: 'manual',
+    httpHost: '127.0.0.1',
+    httpPort: 7777,
+    httpsHost: '127.0.0.1',
+  });
+  assert.strictEqual(def.service, 'GNOME');
+
+  const kde = linuxStatusFromValues({
+    mode: 'manual',
+    httpHost: '127.0.0.1',
+    httpPort: 7777,
+    httpsHost: '127.0.0.1',
+    service: 'KDE',
+  });
+  assert.strictEqual(kde.service, 'KDE');
+});
+
 test('linuxStatusFromValues — manual but elsewhere', () => {
   const s = linuxStatusFromValues({
     mode: 'manual',
@@ -111,4 +131,9 @@ test('kdeProxyConfigOps returns the expected arg vectors', () => {
     ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'ProxyType']);
   assert.deepStrictEqual(ops.readHttp,
     ['--file', 'kioslaverc', '--group', 'Proxy Settings', '--key', 'httpProxy']);
+});
+
+test('binExists finds an on-PATH binary and rejects a junk name', () => {
+  assert.strictEqual(binExists('sh'), true);
+  assert.strictEqual(binExists('definitely-not-a-real-bin-xyz'), false);
 });

@@ -130,6 +130,21 @@ function macProxyStatus() {
 
 // ── Linux ─────────────────────────────────────────────────────────────────────
 
+// Zero-dependency PATH scan: true if `bin` is an executable file on $PATH.
+// Avoids a hard dependency on the external `which` binary (absent in minimal
+// containers), which otherwise silently broke KDE config + elevation probes.
+function binExists(bin) {
+  const PATH = (process.env.PATH || '').split(':').filter(Boolean);
+  return PATH.some(d => {
+    try {
+      fs.accessSync(path.join(d, bin), fs.constants.X_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 // Pure: the env-var export lines (reused by enable + tests).
 function linuxEnvLines(port) {
   return [
@@ -166,14 +181,14 @@ function parseGsettingsValue(raw) {
 }
 
 // Pure: collapse parsed gsettings values into the shared services[] entry shape.
-function linuxStatusFromValues({ mode, httpHost, httpPort, httpsHost } = {}) {
+function linuxStatusFromValues({ mode, httpHost, httpPort, httpsHost, service = 'GNOME' } = {}) {
   const manual = mode === 'manual';
   const server = httpHost || '';
   const port = Number.isFinite(httpPort) ? httpPort : (parseInt(httpPort, 10) || 0);
   const httpEnabled = manual && !!server;
   const httpsEnabled = manual && !!(httpsHost || server);
   return {
-    service: 'GNOME',
+    service,
     httpEnabled,
     httpsEnabled,
     server,
@@ -191,8 +206,7 @@ function detectLinuxDe() {
     if (r.status === 0) return 'gnome';
   } catch {}
   for (const bin of ['kwriteconfig6', 'kwriteconfig5']) {
-    const w = spawnSync('which', [bin], { stdio: 'pipe' });
-    if (w.status === 0) return 'kde';
+    if (binExists(bin)) return 'kde';
   }
   if (/kde/i.test(process.env.XDG_CURRENT_DESKTOP || '')) return 'kde';
   return null;
@@ -206,8 +220,7 @@ function linuxRunAdmin(argv, { prefer } = {}) {
   const display = cmd.join(' ');
   const order = prefer === 'sudo' ? ['sudo', 'pkexec'] : ['pkexec', 'sudo'];
   for (const elevator of order) {
-    const has = spawnSync('which', [elevator], { stdio: 'pipe' });
-    if (has.status !== 0) continue;
+    if (!binExists(elevator)) continue;
     const args = elevator === 'sudo' ? ['--', ...cmd] : [...cmd];
     const r = spawnSync(elevator, args, { stdio: ['inherit', 'pipe', 'pipe'] });
     if (r.status === 0) return { ok: true };
@@ -289,14 +302,14 @@ function kdeProxyConfigOps(port) {
 
 function kdeWriteBin() {
   for (const bin of ['kwriteconfig6', 'kwriteconfig5']) {
-    if (spawnSync('which', [bin], { stdio: 'pipe' }).status === 0) return bin;
+    if (binExists(bin)) return bin;
   }
   return null;
 }
 
 function kdeReadBin() {
   for (const bin of ['kreadconfig6', 'kreadconfig5']) {
-    if (spawnSync('which', [bin], { stdio: 'pipe' }).status === 0) return bin;
+    if (binExists(bin)) return bin;
   }
   return null;
 }
@@ -346,7 +359,7 @@ function kdeProxyOff() {
 
 function kdeProxyStatus() {
   const bin = kdeReadBin();
-  if (!bin) return [linuxStatusFromValues({ mode: 'none' })];
+  if (!bin) return [linuxStatusFromValues({ mode: 'none', service: 'KDE' })];
   const ops = kdeProxyConfigOps(0);
   const typeR = spawnSync(bin, ops.readType, { encoding: 'utf8', stdio: 'pipe' });
   const httpR = spawnSync(bin, ops.readHttp, { encoding: 'utf8', stdio: 'pipe' });
@@ -361,6 +374,7 @@ function kdeProxyStatus() {
     httpHost: host,
     httpPort: port,
     httpsHost: host,
+    service: 'KDE',
   })];
 }
 
@@ -460,4 +474,5 @@ module.exports = {
   parseGsettingsValue,
   linuxStatusFromValues,
   kdeProxyConfigOps,
+  binExists,
 };
