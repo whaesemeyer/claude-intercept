@@ -29,6 +29,7 @@ All commands use: `node ~/claude_intercept/src/cli.js <command>`
 |---------|-------------|
 | `start` | Start proxy (port **7777**) + dashboard (port **7778**), opens browser |
 | `start --proxy-port 9090 --ui-port 9091 --no-open` | Custom ports, no auto-open |
+| `start --daemon` | Run detached in the background (logs to `captures/intercept.log`) — use this so `stop`/`status` work from a later command |
 | `stop` | Stop a running instance |
 | `status` | Check if running, show capture count |
 | `clear` | Delete all captured traffic |

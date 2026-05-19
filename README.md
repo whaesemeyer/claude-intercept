@@ -80,6 +80,7 @@ claude-intercept <command> [options]
 |---------|-------------|
 | `start` | Start proxy + dashboard (opens browser automatically) |
 | `start --proxy-port 9090 --ui-port 9091 --no-open` | Custom ports, no auto-open |
+| `start --daemon` | Run detached in the background (logs to `captures/intercept.log`); `stop`/`status` then work from any shell |
 | `stop` | Stop a running instance |
 | `status` | Check if running, show capture stats |
 | `clear` | Delete all captured traffic |
