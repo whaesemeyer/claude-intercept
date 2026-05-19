@@ -27,7 +27,7 @@ Capture traffic from your Mac, iPhone, Android, or any device on your network. I
 ## Requirements
 
 - **Node.js v22.5+** (uses built-in `node:sqlite` — no native compilation needed)
-- **macOS** for the system proxy toggle (Linux/Windows manual proxy config works too)
+- **macOS or Linux (GNOME/KDE)** for the one-click system-proxy toggle + automated certificate trust; Windows is manual proxy config
 - **Claude Code** for the `/intercept` skill (optional but recommended)
 
 ---
@@ -103,6 +103,32 @@ claude-intercept <command> [options]
 3. Browse normally — all HTTP/S traffic is now captured
 
 > **Remember to disable** when done (`proxy off` or the Disable button in the dashboard). Leaving the proxy on after stopping the server will break your network connection.
+
+### This Machine (Linux — GNOME / KDE)
+
+Linux is first-class: the proxy toggle and certificate trust are both automated.
+
+1. Open the dashboard → **Setup & Certs** tab (it auto-selects the Linux guide)
+2. Click **Install & Trust CA** — installs the CA into the system trust store
+   (sudo via your desktop's polkit dialog), auto-installs `certutil`
+   (`libnss3-tools`) if missing, and trusts the cert for Chrome/Chromium and
+   Firefox. Or run it from the CLI (terminal sudo prompt):
+   ```bash
+   node ~/claude_intercept/src/cli.js trust
+   ```
+3. Click **Enable for This Machine** (or `node ~/claude_intercept/src/cli.js proxy on`)
+   — toggles the GNOME (`gsettings`) or KDE (`kwriteconfig`) system proxy
+4. Browse normally — all HTTP/S traffic is now captured
+
+Reverse the trust changes any time with the **untrust** command — it removes the
+CA from the system store and the Chrome/Firefox NSS databases:
+```bash
+node ~/claude_intercept/src/cli.js untrust
+```
+
+> On a headless box (no GNOME/KDE), `proxy on` falls back to printing the
+> `http_proxy`/`https_proxy` export lines and the manual trust commands.
+> Some Google-pinned domains fail under any MITM proxy — that's expected.
 
 ### iPhone / iPad
 

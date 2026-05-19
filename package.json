@@ -9,7 +9,8 @@
   "scripts": {
     "start": "node src/cli.js start",
     "stop": "node src/cli.js stop",
-    "setup": "node src/cli.js setup"
+    "setup": "node src/cli.js setup",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=22.15.0"

@@ -560,22 +560,26 @@
       <!-- This Mac toggle -->
       <div class="local-proxy-bar" id="local-proxy-bar">
         <div style="flex:1">
-          <div style="font-weight:600;font-size:13px;margin-bottom:3px">This Mac — System Proxy</div>
+          <div id="local-proxy-title" style="font-weight:600;font-size:13px;margin-bottom:3px">This Mac — System Proxy</div>
           <div id="local-proxy-status" style="font-size:12px;color:var(--text2)">Checking…</div>
         </div>
+        <span id="linux-trust-wrap" style="display:none">
+          <button class="btn" id="btn-trust-ca" onclick="installTrustCA()">Install &amp; Trust CA</button>
+        </span>
         <button class="btn primary" id="btn-proxy-on"  onclick="setLocalProxy(true)"  style="display:none">Enable for This Mac</button>
         <button class="btn danger"  id="btn-proxy-off" onclick="setLocalProxy(false)" style="display:none">Disable</button>
       </div>
+      <div id="linux-trust-result" style="margin:0 0 14px 0"></div>
 
       <!-- Platform tabs -->
       <div class="setup-tabs">
-        <button class="platform-btn active" onclick="showPlatform('this-mac', this)">This Mac</button>
-        <button class="platform-btn" onclick="showPlatform('ios', this)">iOS / iPadOS</button>
-        <button class="platform-btn" onclick="showPlatform('android', this)">Android</button>
-        <button class="platform-btn" onclick="showPlatform('macos', this)">macOS (manual)</button>
-        <button class="platform-btn" onclick="showPlatform('windows', this)">Windows</button>
-        <button class="platform-btn" onclick="showPlatform('linux', this)">Linux</button>
-        <button class="platform-btn" onclick="showPlatform('firefox', this)">Firefox</button>
+        <button class="platform-btn active" data-platform="this-mac" onclick="showPlatform('this-mac', this)">This Mac</button>
+        <button class="platform-btn" data-platform="ios" onclick="showPlatform('ios', this)">iOS / iPadOS</button>
+        <button class="platform-btn" data-platform="android" onclick="showPlatform('android', this)">Android</button>
+        <button class="platform-btn" data-platform="macos" onclick="showPlatform('macos', this)">macOS (manual)</button>
+        <button class="platform-btn" data-platform="windows" onclick="showPlatform('windows', this)">Windows</button>
+        <button class="platform-btn" data-platform="linux" onclick="showPlatform('linux', this)">Linux</button>
+        <button class="platform-btn" data-platform="firefox" onclick="showPlatform('firefox', this)">Firefox</button>
       </div>
 
       <div class="setup-instructions" id="setup-instructions">
@@ -753,6 +757,8 @@ let inspectorCapture = null;
 let PROXY_PORT = 7777;
 let LAN_IP = null;
 let TAILSCALE_IP = null;
+let PLATFORM = null;
+let DE = null;
 let capturePaused = false;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
@@ -864,6 +870,9 @@ async function init() {
     PROXY_PORT = data.proxy.port;
     LAN_IP = data.lanIp;
     TAILSCALE_IP = data.tailscaleIp || null;
+    PLATFORM = data.platform || null;
+    DE = data.de || null;
+    applyPlatformLabels();
     document.getElementById('proxy-port-label').textContent = `:${PROXY_PORT}`;
     document.getElementById('modal-proxy-port').textContent = PROXY_PORT;
     // Update cert command with actual port
@@ -891,7 +900,67 @@ async function init() {
   } catch {}
 
   connectWS();
-  showPlatform('this-mac', document.querySelector('.platform-btn.active'));
+  const defaultPlatform = PLATFORM === 'linux' ? 'linux'
+    : PLATFORM === 'win32' ? 'windows' : 'this-mac';
+  const defaultBtn = [...document.querySelectorAll('.platform-btn')]
+    .find(b => b.dataset.platform === defaultPlatform)
+    || document.querySelector('.platform-btn.active');
+  showPlatform(defaultPlatform, defaultBtn);
+}
+
+// Adjust the system-proxy bar for the host OS. macOS keeps the original
+// "Enable for This Mac" affordance; Linux gets a generic label + the
+// Install & Trust CA button; other platforms hide the bar (it can only
+// toggle the proxy on the machine running the server).
+function applyPlatformLabels() {
+  const bar = document.getElementById('local-proxy-bar');
+  const title = document.getElementById('local-proxy-title');
+  const btnOn = document.getElementById('btn-proxy-on');
+  const trustWrap = document.getElementById('linux-trust-wrap');
+  if (!bar) return;
+  if (PLATFORM === 'darwin') {
+    if (title) title.textContent = 'This Mac — System Proxy';
+    if (btnOn) btnOn.textContent = 'Enable for This Mac';
+    if (trustWrap) trustWrap.style.display = 'none';
+  } else if (PLATFORM === 'linux') {
+    const de = DE === 'kde' ? 'KDE' : DE === 'gnome' ? 'GNOME' : 'GNOME/KDE';
+    if (title) title.textContent = `This Machine — System Proxy (${de})`;
+    if (btnOn) btnOn.textContent = 'Enable for This Machine';
+    if (trustWrap) trustWrap.style.display = '';
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+async function installTrustCA() {
+  const btn = document.getElementById('btn-trust-ca');
+  const out = document.getElementById('linux-trust-result');
+  btn.disabled = true;
+  const prev = btn.textContent;
+  btn.textContent = 'Installing… (watch for a password prompt)';
+  out.innerHTML = '';
+  try {
+    const res = await fetch('/api/trust/linux', { method: 'POST' });
+    const data = await res.json();
+    if (data.error && !data.steps) {
+      out.innerHTML = `<div style="color:#f47067">${escHtml(data.error)}</div>`;
+    } else {
+      out.innerHTML = (data.steps || []).map(s => {
+        const icon = s.ok ? '<span style="color:var(--s2xx,#3fb950)">✓</span>'
+                          : '<span style="color:#f47067">✗</span>';
+        return `<div style="font-size:12px;line-height:1.7">${icon} ${escHtml(s.name)}` +
+               (s.detail ? ` <span style="color:var(--text3)">— ${escHtml(s.detail)}</span>` : '') +
+               `</div>`;
+      }).join('') + (data.ok
+        ? `<div style="color:var(--s2xx,#3fb950);font-size:12px;margin-top:6px">All steps completed.</div>`
+        : `<div style="color:#f47067;font-size:12px;margin-top:6px">Some steps need attention — see the manual instructions below.</div>`);
+    }
+  } catch (e) {
+    out.innerHTML = `<div style="color:#f47067">Failed: ${escHtml(e.message)}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
 }
 
 function renderIPBar(data) {
@@ -1291,6 +1360,10 @@ async function refreshLocalProxyStatus() {
       const other = services.find(s => s.httpEnabled);
       statusEl.innerHTML = `<span style="color:var(--put)">● Proxy on</span> — but pointing to ${other?.server}:${other?.port}. Click enable to redirect.`;
       btnOn.style.display = btnOff.style.display = '';
+    } else if (!services.length && PLATFORM === 'linux' && !DE) {
+      statusEl.innerHTML = `<span style="color:var(--text3)">○ Env only</span> — no GNOME/KDE detected; set the proxy env vars (see Linux tab)`;
+      btnOn.style.display  = '';
+      btnOff.style.display = 'none';
     } else {
       statusEl.innerHTML = `<span style="color:var(--text3)">○ Off</span> — direct connections`;
       btnOn.style.display  = '';
@@ -1407,7 +1480,12 @@ function showTab(name, btn) {
     // Load default platform instructions if not already loaded
     const el = document.getElementById('setup-instructions');
     if (el && el.innerHTML.trim() === '') {
-      showPlatform('this-mac', document.querySelector('.platform-btn.active'));
+      const dp = PLATFORM === 'linux' ? 'linux'
+        : PLATFORM === 'win32' ? 'windows' : 'this-mac';
+      const dbtn = [...document.querySelectorAll('.platform-btn')]
+        .find(b => b.dataset.platform === dp)
+        || document.querySelector('.platform-btn.active');
+      showPlatform(dp, dbtn);
     }
   }
 }

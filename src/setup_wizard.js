@@ -1,17 +1,240 @@
 'use strict';
 
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const CA_CERT_PATH = path.join(__dirname, '../certs/ca.crt');
+
+// Pure: map an /etc/os-release body to a package family.
+function parseOsRelease(text) {
+  const fields = {};
+  for (const line of String(text || '').split('\n')) {
+    const m = line.match(/^([A-Z_]+)=(.*)$/);
+    if (m) fields[m[1]] = m[2].replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+  }
+  const hay = `${fields.ID || ''} ${fields.ID_LIKE || ''}`.toLowerCase();
+  if (/\b(debian|ubuntu|linuxmint|pop|raspbian)\b/.test(hay)) return 'debian';
+  if (/\b(rhel|fedora|centos|rocky|almalinux|amzn|ol)\b/.test(hay)) return 'rhel';
+  if (/\b(arch|manjaro|endeavouros)\b/.test(hay)) return 'arch';
+  return 'unknown';
+}
+
+// Injectable: probe the Linux environment. `deps` lets tests stub everything.
+function detectLinuxEnv(deps = {}) {
+  const readOsRelease = deps.readOsRelease || (() => {
+    try { return fs.readFileSync('/etc/os-release', 'utf8'); } catch { return ''; }
+  });
+  const has = deps.has || ((bin) => {
+    try { return spawnSync('which', [bin], { stdio: 'pipe' }).status === 0; } catch { return false; }
+  });
+  const detectDe = deps.detectDe || (() => {
+    try { return require('./system_proxy').detectLinuxDe(); } catch { return null; }
+  });
+  return {
+    family: parseOsRelease(readOsRelease()),
+    hasUpdateCaCerts: has('update-ca-certificates'),
+    hasUpdateCaTrust: has('update-ca-trust'),
+    hasTrust: has('trust'),
+    hasCertutil: has('certutil'),
+    hasGsettings: has('gsettings'),
+    de: detectDe(),
+  };
+}
+
+// Auto cert-trust routine. `runAdmin` is the elevation helper (injectable),
+// `spawn` runs non-elevated commands. Returns { steps:[{name,ok,detail}], ok }
+// and never throws — each step records its own outcome.
+function trustCertLinux(opts = {}) {
+  const env = opts.env || detectLinuxEnv(opts.envDeps);
+  const runAdmin = opts.runAdmin || ((argv) => require('./system_proxy').linuxRunAdmin(argv, { prefer: opts.prefer }));
+  const spawn = opts.spawn || ((cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', stdio: 'pipe' }));
+  const caPath = opts.caPath || CA_CERT_PATH;
+  const home = opts.home || os.homedir();
+  const steps = [];
+  const record = (name, ok, detail) => { steps.push({ name, ok, detail }); return ok; };
+
+  // 1. Locate CA, copy to a temp path.
+  let tmpCa = caPath;
+  try {
+    if (!fs.existsSync(caPath)) {
+      record('Locate CA certificate', false, `Not found at ${caPath} — start the proxy once to generate it`);
+      return { steps, ok: false };
+    }
+    tmpCa = opts.tmpCa || path.join(os.tmpdir(), `claude-intercept-ca-${Date.now()}.crt`);
+    fs.copyFileSync(caPath, tmpCa);
+    record('Locate CA certificate', true, caPath);
+  } catch (e) {
+    record('Locate CA certificate', false, e.message);
+    return { steps, ok: false };
+  }
+
+  // 2. System trust store (elevated).
+  let sysArgv = null;
+  if (env.family === 'debian') {
+    sysArgv = ['/bin/sh', '-c',
+      `cp ${tmpCa} /usr/local/share/ca-certificates/claude-intercept.crt && update-ca-certificates`];
+  } else if (env.family === 'rhel') {
+    sysArgv = ['/bin/sh', '-c',
+      `cp ${tmpCa} /etc/pki/ca-trust/source/anchors/claude-intercept.crt && update-ca-trust extract`];
+  } else if (env.family === 'arch') {
+    sysArgv = ['/bin/sh', '-c', `trust anchor --store ${tmpCa}`];
+  }
+  if (sysArgv) {
+    const r = runAdmin(sysArgv);
+    record('Install in system trust store', !!r.ok,
+      r.ok ? `${env.family} store updated` : (r.error || 'elevation failed'));
+  } else {
+    record('Install in system trust store', false,
+      `Unknown distro family — copy ${tmpCa} into your CA anchors manually`);
+  }
+
+  // 3. certutil bootstrap (no sudo for the nssdb itself; install needs sudo).
+  if (!env.hasCertutil) {
+    let installArgv = null;
+    if (env.family === 'debian') installArgv = ['/bin/sh', '-c', 'apt-get install -y libnss3-tools'];
+    else if (env.family === 'rhel') installArgv = ['/bin/sh', '-c', 'dnf install -y nss-tools'];
+    else if (env.family === 'arch') installArgv = ['/bin/sh', '-c', 'pacman -S --noconfirm nss'];
+    if (installArgv) {
+      const r = runAdmin(installArgv);
+      record('Install certutil (libnss3-tools)', !!r.ok,
+        r.ok ? 'installed' : (r.error || 'elevation failed'));
+    } else {
+      record('Install certutil (libnss3-tools)', false, 'Install the NSS tools package for your distro');
+    }
+  } else {
+    record('Install certutil (libnss3-tools)', true, 'already present');
+  }
+
+  const nssdb = path.join(home, '.pki', 'nssdb');
+  if (!fs.existsSync(nssdb)) {
+    try { fs.mkdirSync(nssdb, { recursive: true }); } catch {}
+    const r = spawn('certutil', ['-N', '--empty-password', '-d', `sql:${nssdb}`]);
+    record('Initialise ~/.pki/nssdb', r && r.status === 0,
+      r && r.status === 0 ? nssdb : (r && (r.stderr || r.error?.message)) || 'certutil unavailable');
+  } else {
+    record('Initialise ~/.pki/nssdb', true, 'exists');
+  }
+
+  // 4. Chrome/Chromium NSS store (NEVER elevated — user db).
+  {
+    spawn('certutil', ['-D', '-d', `sql:${nssdb}`, '-n', 'Claude Intercept']); // idempotent delete
+    const r = spawn('certutil', ['-d', `sql:${nssdb}`, '-A', '-t', 'C,,', '-n', 'Claude Intercept', '-i', tmpCa]);
+    record('Trust in Chrome/Chromium (NSS)', r && r.status === 0,
+      r && r.status === 0 ? nssdb : (r && (r.stderr || r.error?.message)) || 'certutil unavailable');
+  }
+
+  // 5. Firefox per-profile NSS stores (NEVER elevated — user dirs).
+  {
+    const ffRoot = path.join(home, '.mozilla', 'firefox');
+    let profiles = [];
+    try {
+      profiles = fs.readdirSync(ffRoot)
+        .map(d => path.join(ffRoot, d))
+        .filter(d => {
+          try { return fs.statSync(d).isDirectory() &&
+            (fs.existsSync(path.join(d, 'cert9.db')) || fs.existsSync(path.join(d, 'cert8.db'))); }
+          catch { return false; }
+        });
+    } catch {}
+    if (!profiles.length) {
+      record('Trust in Firefox profiles', true,
+        'No NSS Firefox profiles found — set security.enterprise_roots.enabled=true to use the system store');
+    } else {
+      let allOk = true;
+      const done = [];
+      for (const d of profiles) {
+        spawn('certutil', ['-D', '-d', `sql:${d}`, '-n', 'Claude Intercept']);
+        const r = spawn('certutil', ['-d', `sql:${d}`, '-A', '-t', 'C,,', '-n', 'Claude Intercept', '-i', tmpCa]);
+        if (!(r && r.status === 0)) allOk = false; else done.push(path.basename(d));
+      }
+      record('Trust in Firefox profiles', allOk,
+        `${done.length} profile(s); also honours security.enterprise_roots.enabled`);
+    }
+  }
+
+  try { if (tmpCa !== caPath) fs.unlinkSync(tmpCa); } catch {}
+  const ok = steps.every(s => s.ok);
+  return { steps, ok };
+}
+
+// Reverse trustCertLinux — remove the CA from every store we touched.
+function untrustCertLinux(opts = {}) {
+  const env = opts.env || detectLinuxEnv(opts.envDeps);
+  const runAdmin = opts.runAdmin || ((argv) => require('./system_proxy').linuxRunAdmin(argv, { prefer: opts.prefer }));
+  const spawn = opts.spawn || ((cmd, args) => spawnSync(cmd, args, { encoding: 'utf8', stdio: 'pipe' }));
+  const home = opts.home || os.homedir();
+  const steps = [];
+  const record = (name, ok, detail) => { steps.push({ name, ok, detail }); return ok; };
+
+  let sysArgv = null;
+  if (env.family === 'debian') {
+    sysArgv = ['/bin/sh', '-c',
+      'rm -f /usr/local/share/ca-certificates/claude-intercept.crt && update-ca-certificates --fresh'];
+  } else if (env.family === 'rhel') {
+    sysArgv = ['/bin/sh', '-c',
+      'rm -f /etc/pki/ca-trust/source/anchors/claude-intercept.crt && update-ca-trust extract'];
+  } else if (env.family === 'arch') {
+    sysArgv = ['/bin/sh', '-c', 'trust anchor --remove "Claude Intercept" || true'];
+  }
+  if (sysArgv) {
+    const r = runAdmin(sysArgv);
+    record('Remove from system trust store', !!r.ok, r.ok ? `${env.family} store updated` : (r.error || 'elevation failed'));
+  } else {
+    record('Remove from system trust store', false, 'Unknown distro family — remove the CA anchor manually');
+  }
+
+  const nssdb = path.join(home, '.pki', 'nssdb');
+  if (fs.existsSync(nssdb)) {
+    const r = spawn('certutil', ['-D', '-d', `sql:${nssdb}`, '-n', 'Claude Intercept']);
+    record('Remove from Chrome/Chromium (NSS)', r && (r.status === 0 || r.status === 255), nssdb);
+  } else {
+    record('Remove from Chrome/Chromium (NSS)', true, 'no nssdb');
+  }
+
+  const ffRoot = path.join(home, '.mozilla', 'firefox');
+  let profiles = [];
+  try {
+    profiles = fs.readdirSync(ffRoot).map(d => path.join(ffRoot, d)).filter(d => {
+      try { return fs.statSync(d).isDirectory() &&
+        (fs.existsSync(path.join(d, 'cert9.db')) || fs.existsSync(path.join(d, 'cert8.db'))); }
+      catch { return false; }
+    });
+  } catch {}
+  for (const d of profiles) spawn('certutil', ['-D', '-d', `sql:${d}`, '-n', 'Claude Intercept']);
+  record('Remove from Firefox profiles', true, `${profiles.length} profile(s)`);
+
+  const ok = steps.every(s => s.ok);
+  return { steps, ok };
+}
+
 /**
  * Returns step-by-step setup instructions for a given platform.
  * Each step: { title, html, code?, qrUrl? }
  *
  * lanIp is passed from the server so instructions show the real IP.
  */
-function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscaleIp = null) {
+function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscaleIp = null, opts = {}) {
   const ip = lanIp || '<your-mac-ip>';
   const uiPort = 7778; // always dashboard port
   const certUrl = `http://${ip}:${uiPort}/api/cert`;
   const localCertUrl = `http://127.0.0.1:${uiPort}/api/cert`;
   const tailscaleCertUrl = tailscaleIp ? `http://${tailscaleIp}:${uiPort}/api/cert` : null;
+
+  // Tailor the Linux tab to the actual distro/desktop. Injectable for tests.
+  const lenv = opts.linuxEnv || (platform === 'linux'
+    ? (opts.detectLinuxEnv || detectLinuxEnv)()
+    : null);
+  const sysStore = lenv && lenv.family === 'rhel'
+    ? `sudo cp claude-intercept-ca.crt /etc/pki/ca-trust/source/anchors/\nsudo update-ca-trust extract`
+    : lenv && lenv.family === 'arch'
+    ? `sudo trust anchor --store claude-intercept-ca.crt`
+    : `sudo cp claude-intercept-ca.crt /usr/local/share/ca-certificates/\nsudo update-ca-certificates`;
+  const certutilPkg = lenv && lenv.family === 'rhel' ? 'sudo dnf install -y nss-tools'
+    : lenv && lenv.family === 'arch' ? 'sudo pacman -S --noconfirm nss'
+    : 'sudo apt-get install -y libnss3-tools';
+  const deName = lenv && lenv.de === 'kde' ? 'KDE' : lenv && lenv.de === 'gnome' ? 'GNOME' : 'GNOME/KDE';
 
   const platforms = {
     'this-mac': [
@@ -209,27 +432,43 @@ function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscal
 
     linux: [
       {
+        title: 'One-click install & trust (recommended)',
+        html: `Click <strong>Install &amp; Trust CA</strong> above, or run <code>node ~/claude_intercept/src/cli.js trust</code>. This installs the CA into the system store (sudo prompt via your desktop's polkit dialog or the terminal), auto-installs <code>certutil</code> if missing, and trusts the cert for Chrome/Chromium and Firefox. The steps below are the manual equivalent — use them if the automated run fails or you're on a headless box.`,
+      },
+      {
         title: 'Download the CA Certificate',
         html: `Run this from your terminal (while claude-intercept is running):`,
         code: `curl -o claude-intercept-ca.crt ${localCertUrl}`,
       },
       {
-        title: 'Install system-wide (Debian/Ubuntu)',
-        code: `sudo cp claude-intercept-ca.crt /usr/local/share/ca-certificates/\nsudo update-ca-certificates`,
+        title: `Install system-wide${lenv ? ` (${lenv.family === 'rhel' ? 'RHEL/Fedora' : lenv.family === 'arch' ? 'Arch' : 'Debian/Ubuntu'})` : ''}`,
+        html: `Adds the CA to the OS trust store used by <code>curl</code>, <code>git</code>, and most CLI tools. <strong>Requires sudo.</strong>`,
+        code: sysStore,
+        warning: true,
       },
       {
-        title: 'Install system-wide (RHEL/Fedora/Arch)',
-        code: `# RHEL/Fedora:\nsudo cp claude-intercept-ca.crt /etc/pki/ca-trust/source/anchors/\nsudo update-ca-trust extract\n\n# Arch:\nsudo trust anchor --store claude-intercept-ca.crt`,
+        title: 'Trust the CA in Chrome / Chromium',
+        html: `Chrome on Linux uses its own NSS database (<code>~/.pki/nssdb</code>), not the system store.${lenv && !lenv.hasCertutil ? ` <code>certutil</code> is not installed — install the NSS tools first:` : ''}`,
+        code: `${lenv && !lenv.hasCertutil ? `${certutilPkg}\n` : ''}certutil -d sql:$HOME/.pki/nssdb -A -t "C,," -n "Claude Intercept" -i claude-intercept-ca.crt`,
       },
       {
-        title: 'Set proxy environment variables',
-        html: `Add to your shell config (<code>~/.bashrc</code> or <code>~/.zshrc</code>) for persistent use, or set inline for single commands:`,
+        title: 'Trust the CA in Firefox',
+        html: `Firefox keeps its own per-profile NSS store. Either import it via <strong>Settings → Privacy &amp; Security → View Certificates → Authorities → Import</strong>, or set <code>security.enterprise_roots.enabled = true</code> in <code>about:config</code> so Firefox honours the system store, or run:`,
+        code: `for d in ~/.mozilla/firefox/*.default* ~/.mozilla/firefox/*; do\n  [ -f "$d/cert9.db" ] && certutil -d sql:"$d" -A -t "C,," -n "Claude Intercept" -i claude-intercept-ca.crt\ndone`,
+      },
+      {
+        title: `Enable the system proxy (${deName})`,
+        html: `Use the <strong>Enable for This Machine</strong> button above, or the CLI. This toggles ${deName} proxy settings automatically:`,
+        code: `node ~/claude_intercept/src/cli.js proxy on`,
+      },
+      {
+        title: 'Set proxy environment variables (CLI tools)',
+        html: `Many CLI tools (<code>curl</code>, <code>npm</code>, <code>git</code>) use env vars rather than the desktop proxy. Add to <code>~/.bashrc</code>/<code>~/.zshrc</code> for persistence, or set inline:`,
         code: `export http_proxy=http://127.0.0.1:${proxyPort}\nexport https_proxy=http://127.0.0.1:${proxyPort}\nexport HTTP_PROXY=http://127.0.0.1:${proxyPort}\nexport HTTPS_PROXY=http://127.0.0.1:${proxyPort}\nexport no_proxy=localhost,127.0.0.1`,
       },
       {
-        title: 'GNOME (automatic)',
-        html: `For GNOME apps, proxy settings can be applied automatically:`,
-        code: `gsettings set org.gnome.system.proxy mode 'manual'\ngsettings set org.gnome.system.proxy.http host '127.0.0.1'\ngsettings set org.gnome.system.proxy.http port ${proxyPort}\ngsettings set org.gnome.system.proxy.https host '127.0.0.1'\ngsettings set org.gnome.system.proxy.https port ${proxyPort}`,
+        title: 'Note: Google-pinned domains',
+        html: `Some Google properties (and a handful of apps) pin their certificates and will fail under any MITM proxy — this is expected and not a bug. Disable the proxy for those, or accept the gaps.`,
       },
     ],
 
@@ -259,4 +498,10 @@ function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscal
   return { platform, steps, proxyPort, lanIp: ip, tailscaleIp, topWarning };
 }
 
-module.exports = { getSetupInstructions };
+module.exports = {
+  getSetupInstructions,
+  parseOsRelease,
+  detectLinuxEnv,
+  trustCertLinux,
+  untrustCertLinux,
+};

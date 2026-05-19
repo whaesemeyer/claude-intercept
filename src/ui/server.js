@@ -64,9 +64,16 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
 
   app.get('/api/status', (req, res) => {
     const { lanIp, tailscaleIp } = getNetworkInfo();
+    const platform = os.platform();
+    let de = null;
+    if (platform === 'linux') {
+      try { de = require('../system_proxy').detectLinuxDe(); } catch {}
+    }
     res.json({
       proxy: { port: proxyPort, running: true },
       ui: { port: uiPort },
+      platform,
+      de,
       lanIp,
       tailscaleIp,
       certUrl: `http://${lanIp}:${uiPort}/api/cert`,
@@ -183,6 +190,25 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
   app.get('/api/proxy/status', (req, res) => {
     const sysProxy = require('../system_proxy');
     res.json(sysProxy.status());
+  });
+
+  // Linux automated CA trust (dashboard path → pkexec GUI prompt).
+  app.post('/api/trust/linux', (req, res) => {
+    try {
+      const { trustCertLinux } = require('../setup_wizard');
+      res.json(trustCertLinux());
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/api/untrust/linux', (req, res) => {
+    try {
+      const { untrustCertLinux } = require('../setup_wizard');
+      res.json(untrustCertLinux());
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
   });
 
   app.post('/api/capture/pause', (req, res) => {

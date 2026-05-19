@@ -210,6 +210,51 @@ program
     console.log(chalk.dim('\nInstall this as a trusted root CA on the devices you want to intercept.'));
   });
 
+function printTrustSteps(result) {
+  for (const s of result.steps || []) {
+    const icon = s.ok ? chalk.green('✓') : chalk.yellow('✗');
+    const detail = s.detail ? chalk.dim(` — ${s.detail}`) : '';
+    console.log(`  ${icon} ${s.name}${detail}`);
+  }
+  if (result.ok) {
+    console.log(chalk.green('\n  All steps completed.\n'));
+  } else {
+    console.log(chalk.yellow('\n  Some steps need attention — see the Linux setup tab for the manual equivalents.\n'));
+  }
+}
+
+program
+  .command('trust')
+  .description('Install & trust the CA on Linux (system store + Chrome/Chromium + Firefox)')
+  .action(() => {
+    if (os.platform() !== 'linux') {
+      console.log(chalk.yellow('  Automated trust is Linux-only. On macOS use the Setup tab; on Windows import the cert manually.'));
+      return;
+    }
+    const certManager = require('./proxy/cert_manager');
+    certManager.init();
+    const { trustCertLinux } = require('./setup_wizard');
+    console.log(chalk.bold.blue('\n  Trusting Claude Intercept CA…\n'));
+    console.log(chalk.dim('  You may be prompted for your sudo password.\n'));
+    const result = trustCertLinux({ prefer: 'sudo' });
+    printTrustSteps(result);
+  });
+
+program
+  .command('untrust')
+  .description('Remove the Claude Intercept CA from Linux trust stores')
+  .action(() => {
+    if (os.platform() !== 'linux') {
+      console.log(chalk.yellow('  Automated untrust is Linux-only.'));
+      return;
+    }
+    const { untrustCertLinux } = require('./setup_wizard');
+    console.log(chalk.bold.blue('\n  Removing Claude Intercept CA…\n'));
+    console.log(chalk.dim('  You may be prompted for your sudo password.\n'));
+    const result = untrustCertLinux({ prefer: 'sudo' });
+    printTrustSteps(result);
+  });
+
 const proxyCmd = program
   .command('proxy')
   .description('Control this machine\'s system proxy settings');
@@ -236,6 +281,9 @@ proxyCmd
     if (result.errors?.length) {
       for (const e of result.errors) console.log(chalk.yellow(`  ! ${e}`));
     }
+    if (result.message) {
+      console.log(chalk.yellow(`  ! ${result.message}`));
+    }
     if (result.envLines) {
       console.log(chalk.dim('\n  Add these to your shell for CLI tools:'));
       for (const l of result.envLines) console.log(chalk.cyan(`    ${l}`));
@@ -257,6 +305,12 @@ proxyCmd
       for (const svc of result.deactivated) {
         console.log(chalk.green(`  ✓ ${svc} — restored`));
       }
+    }
+    if (result.errors?.length) {
+      for (const e of result.errors) console.log(chalk.yellow(`  ! ${e}`));
+    }
+    if (result.message) {
+      console.log(chalk.yellow(`  ! ${result.message}`));
     }
     if (result.error) {
       console.error(chalk.red(`  ✗ ${result.error}`));

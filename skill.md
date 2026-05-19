@@ -17,7 +17,7 @@ This starts the proxy on port **7777**, opens the dashboard at **http://127.0.0.
 
 **Step 2b — Already running:** Tell the user the dashboard URL (`http://127.0.0.1:7778`) and ask what they want to do.
 
-Then ask the user: *"What do you want to intercept — this Mac, an iPhone, an Android device, or a specific CLI tool?"* and guide accordingly.
+Then ask the user: *"What do you want to intercept — this Mac, this Linux machine, an iPhone, an Android device, or a specific CLI tool?"* and guide accordingly.
 
 ---
 
@@ -47,7 +47,7 @@ All commands use: `node ~/claude_intercept/src/cli.js <command>`
 1. Run `start` — this generates the CA cert (first run), starts proxy + opens dashboard
 2. Tell the user the proxy address (printed in output)
 3. Guide them to the Setup tab in the dashboard, or ask which device/browser they're using
-4. Walk them through cert installation for their platform (macOS / iOS / Android / Windows / Firefox)
+4. Walk them through cert installation for their platform (macOS / Linux / iOS / Android / Windows / Firefox)
 5. Confirm traffic is appearing in the Traffic tab
 
 ### Analyzing captured traffic
@@ -95,6 +95,22 @@ If the user doesn't want to use the web dashboard, give them these quick instruc
    sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Downloads/claude-intercept-ca.crt
    ```
 4. Enable proxy: Dashboard → Setup & Certs → **Enable for This Mac**
+
+### Linux (GNOME / KDE)
+
+Fully automated — the CLI handles sudo, certutil install, and all trust stores.
+
+1. Trust the CA (system store + Chrome/Chromium NSS + Firefox profiles; auto-installs `libnss3-tools`/`nss-tools`/`nss` if `certutil` is missing — sudo prompt via polkit or terminal):
+   ```bash
+   node ~/claude_intercept/src/cli.js trust
+   ```
+2. Enable the proxy (toggles GNOME `gsettings` or KDE `kwriteconfig` automatically):
+   ```bash
+   node ~/claude_intercept/src/cli.js proxy on
+   ```
+3. Reverse later with `node ~/claude_intercept/src/cli.js untrust` and `proxy off`.
+
+Headless (no GNOME/KDE): `proxy on` prints the `http_proxy`/`https_proxy` export lines instead. Note: some Google-pinned domains fail under MITM — expected, not a bug.
 
 ### iOS
 1. Connect iPhone to same Wi-Fi
