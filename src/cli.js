@@ -146,27 +146,45 @@ program
     }
   });
 
+function readStatus() {
+  if (!fs.existsSync(PID_FILE)) {
+    return { running: false, pid: null, stats: null };
+  }
+  const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+  try {
+    process.kill(pid, 0);
+    let stats = null;
+    try {
+      const db = require('./storage/db');
+      db.init();
+      stats = db.getStats();
+    } catch {}
+    return { running: true, pid, stats };
+  } catch {
+    fs.unlinkSync(PID_FILE);
+    return { running: false, pid: null, stats: null, stalePid: true };
+  }
+}
+
 program
   .command('status')
   .description('Show proxy status and stats')
-  .action(() => {
-    if (!fs.existsSync(PID_FILE)) {
-      console.log(chalk.red('  ✗ Not running'));
+  .option('--json', 'Output status as JSON (for agents/scripts)')
+  .action((opts) => {
+    const s = readStatus();
+    if (opts.json) {
+      process.stdout.write(JSON.stringify(s, null, 2) + '\n');
       return;
     }
-    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-    try {
-      process.kill(pid, 0);
-      console.log(chalk.green(`  ✓ Running (PID ${pid})`));
-      try {
-        const db = require('./storage/db');
-        db.init();
-        const stats = db.getStats();
-        console.log(`    Captures: ${stats.total}  |  Hosts: ${stats.hosts}`);
-      } catch {}
-    } catch {
+    if (s.running) {
+      console.log(chalk.green(`  ✓ Running (PID ${s.pid})`));
+      if (s.stats) {
+        console.log(`    Captures: ${s.stats.total}  |  Hosts: ${s.stats.hosts}`);
+      }
+    } else if (s.stalePid) {
       console.log(chalk.red('  ✗ Stale PID file — process not found'));
-      fs.unlinkSync(PID_FILE);
+    } else {
+      console.log(chalk.red('  ✗ Not running'));
     }
   });
 
@@ -181,16 +199,49 @@ program
   });
 
 program
+  .command('devices')
+  .description('List device labels seen in captured traffic')
+  .option('--json', 'Output as JSON (for agents/scripts)')
+  .action((opts) => {
+    const db = require('./storage/db');
+    db.init();
+    const devices = db.getDevices();
+    if (opts.json) {
+      process.stdout.write(JSON.stringify({ devices }, null, 2) + '\n');
+      return;
+    }
+    if (!devices.length) {
+      console.log(chalk.dim('  No devices recorded yet.'));
+      return;
+    }
+    console.log(chalk.bold('\n  Devices:\n'));
+    for (const d of devices) console.log(`  • ${d}`);
+    console.log('');
+  });
+
+program
   .command('export')
   .description('Export captures to stdout for Claude analysis')
   .option('--mode <mode>', 'Export mode: api-docs | auth | summary | full', 'api-docs')
   .option('--host <host>', 'Filter by host')
+  .option('--device <label>', 'Filter by device label (see "devices")')
   .option('--limit <n>', 'Max captures', '100')
+  .option('--json', 'Emit structured JSON instead of Markdown (for agents/scripts)')
   .action((opts) => {
     const db = require('./storage/db');
-    const { buildClaudeExport } = require('./analyze');
+    const { buildClaudeExport, buildJsonExport } = require('./analyze');
     db.init();
-    const { rows } = db.queryCaptures({ host: opts.host, limit: parseInt(opts.limit, 10) });
+    const { rows } = db.queryCaptures({
+      host: opts.host,
+      device: opts.device,
+      limit: parseInt(opts.limit, 10),
+    });
+    if (opts.json) {
+      // Always emit valid JSON (even when empty) so callers can parse unconditionally.
+      const doc = buildJsonExport(rows, { mode: opts.mode });
+      process.stdout.write(JSON.stringify(doc, null, 2) + '\n');
+      return;
+    }
     if (!rows.length) {
       console.error(chalk.yellow('  No captures found.'));
       process.exit(1);
@@ -322,9 +373,14 @@ proxyCmd
 proxyCmd
   .command('status')
   .description('Show current system proxy state')
-  .action(() => {
+  .option('--json', 'Output as JSON (for agents/scripts)')
+  .action((opts) => {
     const sysProxy = require('./system_proxy');
     const result = sysProxy.status();
+    if (opts.json) {
+      process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+      return;
+    }
     console.log(chalk.bold(`\n  System proxy (${result.platform}):\n`));
 
     if (!result.services?.length) {

@@ -31,12 +31,16 @@ All commands use: `node ~/claude_intercept/src/cli.js <command>`
 | `start --proxy-port 9090 --ui-port 9091 --no-open` | Custom ports, no auto-open |
 | `stop` | Stop a running instance |
 | `status` | Check if running, show capture count |
+| `status --json` | Machine-readable status — parse instead of scraping output |
 | `clear` | Delete all captured traffic |
+| `devices` | List device labels in captured traffic (`--json` for parity) |
 | `cert` | Print path to the CA certificate |
 | `export --mode api-docs` | Export captured traffic for analysis |
 | `export --mode auth` | Extract auth tokens/cookies/keys |
 | `export --mode summary` | High-level traffic overview |
 | `export --mode full --host api.example.com` | Full detail for a specific host |
+| `export --device <label>` | Scope export to one device (see `devices`) |
+| `export --json` | Structured JSON (`{ meta, captures }`) instead of Markdown — prefer this when consuming programmatically |
 
 ---
 

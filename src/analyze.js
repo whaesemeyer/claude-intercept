@@ -336,4 +336,23 @@ function findKeys(obj, pattern, host, url, results, prefix = '') {
   }
 }
 
-module.exports = { buildClaudeExport };
+// ── Machine-readable export ───────────────────────────────────────────────────
+/**
+ * Structured JSON for programmatic/agent consumption. Captures are already
+ * plain objects (headers parsed by db.parseRow), so they serialize directly.
+ * `meta` overrides are shallow-merged last so callers can inject a fixed
+ * `generatedAt` for deterministic tests.
+ */
+function buildJsonExport(captures, meta = {}) {
+  return {
+    meta: {
+      count: captures.length,
+      hosts: [...new Set(captures.map(c => c.host))].sort(),
+      generatedAt: new Date().toISOString(),
+      ...meta,
+    },
+    captures,
+  };
+}
+
+module.exports = { buildClaudeExport, buildJsonExport };

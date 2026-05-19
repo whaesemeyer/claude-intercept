@@ -82,15 +82,19 @@ claude-intercept <command> [options]
 | `start --proxy-port 9090 --ui-port 9091 --no-open` | Custom ports, no auto-open |
 | `stop` | Stop a running instance |
 | `status` | Check if running, show capture stats |
+| `status --json` | Same, as machine-readable JSON (for agents/scripts) |
 | `clear` | Delete all captured traffic |
+| `devices` | List device labels seen in captured traffic (`--json` for parity) |
 | `cert` | Print path to the CA certificate |
 | `export --mode api-docs` | Export for Claude — document discovered APIs |
 | `export --mode auth` | Extract Bearer tokens, cookies, API keys |
 | `export --mode summary` | High-level traffic overview |
 | `export --mode full --host api.example.com` | Full headers + bodies for one host |
+| `export --device iPhone` | Only captures from a given device (see `devices`) |
+| `export --json` | Structured JSON instead of Markdown — pipe straight into an agent |
 | `proxy on` | Enable system proxy on this Mac |
 | `proxy off` | Disable system proxy |
-| `proxy status` | Show current system proxy state |
+| `proxy status` | Show current system proxy state (`--json` for machine-readable) |
 
 ---
 
