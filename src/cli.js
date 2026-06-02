@@ -9,6 +9,7 @@ const os = require('os');
 
 const PROJECT_ROOT = path.join(__dirname, '..');
 const PID_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.pid');
+const LOG_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.log');
 
 // ── Shared startup ────────────────────────────────────────────────────────────
 async function startIntercept({ proxyPort, uiPort, open: autoOpen }) {
@@ -91,6 +92,72 @@ function shutdown(proxy) {
   process.exit(0);
 }
 
+// ── Daemon mode ───────────────────────────────────────────────────────────────
+
+// Returns the live PID from the PID file, or null. Clears a stale PID file.
+function isRunning() {
+  if (!fs.existsSync(PID_FILE)) return null;
+  try {
+    const pid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    process.kill(pid, 0);
+    return pid;
+  } catch {
+    try { fs.unlinkSync(PID_FILE); } catch {}
+    return null;
+  }
+}
+
+// Pure: argv for the detached child. Deliberately omits --daemon so the child
+// runs the normal foreground path (and writes its own PID) — no fork loop.
+function daemonChildArgs(cliPath, { proxyPort, uiPort, open }) {
+  const args = [cliPath, 'start', '--proxy-port', String(proxyPort), '--ui-port', String(uiPort)];
+  if (!open) args.push('--no-open');
+  return args;
+}
+
+// Spawn a detached background instance, then wait for it to write the PID file
+// so we can confirm a clean start before the parent exits.
+function startDaemon({ proxyPort, uiPort, open }) {
+  const existing = isRunning();
+  if (existing) {
+    console.log(chalk.yellow(`[intercept] Already running (PID ${existing})`));
+    console.log(chalk.cyan(`  Proxy: http://127.0.0.1:${proxyPort}`));
+    console.log(chalk.cyan(`  Dashboard: http://127.0.0.1:${uiPort}`));
+    return;
+  }
+
+  fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+  const logFd = fs.openSync(LOG_FILE, 'a');
+  const { spawn } = require('child_process');
+  const child = spawn(
+    process.execPath,
+    daemonChildArgs(__filename, { proxyPort, uiPort, open }),
+    { detached: true, stdio: ['ignore', logFd, logFd] }
+  );
+  child.unref();
+  fs.closeSync(logFd);
+
+  const deadline = Date.now() + 8000;
+  (function poll() {
+    const pid = isRunning();
+    if (pid) {
+      console.log(chalk.green(`  ✓ Claude Intercept started (PID ${pid})`));
+      console.log(`    ${chalk.bold('Proxy:')}     ${chalk.cyan(`http://127.0.0.1:${proxyPort}`)}`);
+      console.log(`    ${chalk.bold('Dashboard:')} ${chalk.cyan(`http://127.0.0.1:${uiPort}`)}`);
+      console.log(chalk.dim(`    Logs:  ${LOG_FILE}`));
+      console.log(chalk.dim(`    Stop:  claude-intercept stop\n`));
+      return;
+    }
+    if (Date.now() > deadline) {
+      console.error(chalk.red('  ✗ Daemon did not come up within 8s.'));
+      console.error(chalk.dim(`    Check the log: ${LOG_FILE}`));
+      process.exitCode = 1;
+      return;
+    }
+    setTimeout(poll, 150);
+  })();
+}
+
 // Safety net: restore proxy on uncaught errors so network isn't left broken
 process.on('uncaughtException', (err) => {
   console.error(chalk.red('\n  Fatal error: ' + err.message));
@@ -114,13 +181,19 @@ program
   .option('-p, --proxy-port <port>', 'Proxy port', '7777')
   .option('-u, --ui-port <port>', 'Dashboard port', '7778')
   .option('--no-open', 'Do not open the dashboard automatically')
+  .option('-d, --daemon', 'Run detached in the background; logs to captures/intercept.log')
   .action(async (opts) => {
     try {
-      await startIntercept({
+      const cfg = {
         proxyPort: parseInt(opts.proxyPort, 10),
         uiPort: parseInt(opts.uiPort, 10),
         open: opts.open !== false,
-      });
+      };
+      if (opts.daemon) {
+        startDaemon(cfg);
+      } else {
+        await startIntercept(cfg);
+      }
     } catch (err) {
       console.error(chalk.red('  Error: ' + err.message));
       process.exit(1);
@@ -399,12 +472,18 @@ proxyCmd
     console.log('');
   });
 
-program.parse(process.argv);
+// Only drive the CLI when executed directly; `require()` (tests) just gets the
+// exported helpers without parsing argv or printing help.
+if (require.main === module) {
+  program.parse(process.argv);
 
-// If no command, show help
-if (!process.argv.slice(2).length) {
-  program.outputHelp();
+  // If no command, show help
+  if (!process.argv.slice(2).length) {
+    program.outputHelp();
+  }
 }
+
+module.exports = { daemonChildArgs };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getLocalIP() {
