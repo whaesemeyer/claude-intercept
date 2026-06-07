@@ -125,6 +125,17 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
     res.json(capture);
   });
 
+  // WebSocket frames for a connection-level capture (method 'WS').
+  app.get('/api/captures/:id/frames', (req, res) => {
+    const id = Number(req.params.id);
+    const limit = Math.min(Number(req.query.limit) || 5000, 10000);
+    const offset = Number(req.query.offset) || 0;
+    res.json({
+      total: db.getWsFrameCount(id),
+      frames: db.getWsFrames(id, { limit, offset }),
+    });
+  });
+
   app.delete('/api/captures', (req, res) => {
     db.clearCaptures();
     broadcast({ type: 'cleared' });

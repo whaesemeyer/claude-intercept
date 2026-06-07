@@ -162,6 +162,6 @@ When analyzing captured API traffic, look for:
 5. **Versioning** — `/v1/`, `/v2/`, header-based versioning
 6. **Error patterns** — 4xx/5xx error shapes, error codes and messages
 7. **JWT tokens** — decode headers and payloads to understand claims and expiry
-8. **WebSocket upgrades** — `Upgrade: websocket` requests are tunneled through transparently and logged as `method=WS` capture rows (host + path + duration). Frame contents are not parsed yet.
+8. **WebSocket frames** — `wss://` upgrades are tunneled transparently and logged as `method=WS` capture rows. Frame contents are captured too: open a WS row's **Frames** tab to replay each message (direction arrow, opcode, decoded payload). Text frames are UTF-8, binary frames base64, and `permessage-deflate` payloads are inflated automatically — so realtime layers (Notion Primus/CRDT, Slack RTM, Discord gateway, GraphQL subscriptions) are inspectable. PING/PONG are counted but kept out of the timeline; high-throughput sockets are capped per-connection with a truncation marker.
 9. **CORS** — Access-Control-* headers revealing allowed origins
 10. **Pagination** — cursor/offset/page patterns in requests and responses

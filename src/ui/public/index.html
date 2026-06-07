@@ -156,6 +156,21 @@
   .method-DELETE { background: rgba(248,81,73,.15);  color: var(--delete); border: 1px solid rgba(248,81,73,.3); }
   .method-PATCH  { background: rgba(163,113,247,.15);color: var(--patch);  border: 1px solid rgba(163,113,247,.3); }
   .method-OPTIONS{ background: rgba(139,148,158,.1); color: var(--options);border: 1px solid rgba(139,148,158,.2); }
+  .method-WS     { background: rgba(46,160,67,.15);  color: #2ecc71;       border: 1px solid rgba(46,160,67,.35); }
+  /* WebSocket frame list (inspector) */
+  .ws-frames { display: flex; flex-direction: column; gap: 4px; }
+  .ws-frame { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; background: var(--bg2); }
+  .ws-frame.dir-out { border-left: 2px solid var(--post); }
+  .ws-frame.dir-in  { border-left: 2px solid var(--get); }
+  .ws-frame-head { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--text3); margin-bottom: 4px; }
+  .ws-arrow { font-family: var(--font-mono); font-weight: 700; }
+  .ws-arrow.out { color: var(--post); }
+  .ws-arrow.in  { color: var(--get); }
+  .ws-op { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .3px; }
+  .ws-frame pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 11px; color: var(--text2); max-height: 240px; overflow: auto; }
+  .ws-frame-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  .ws-frame-bar input, .ws-frame-bar select { font-size: 11px; padding: 3px 6px; background: var(--bg2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
+  .ws-trunc { color: var(--put); font-size: 10px; }
   .status-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 600; min-width: 32px; text-align: center; flex-shrink: 0; }
   .s-2xx { color: var(--s2xx); } .s-3xx { color: var(--s3xx); }
   .s-4xx { color: var(--s4xx); } .s-5xx { color: var(--s5xx); } .s-0 { color: var(--text3); }
@@ -754,6 +769,11 @@ let exportMode = 'api-docs';
 let ws = null;
 let inspectorTab = 'req-headers';
 let inspectorCapture = null;
+// WebSocket frame inspector state
+let wsFrames = [];            // frames for the currently-inspected WS connection
+let wsFramesConnId = null;    // which connection wsFrames belongs to
+let wsOpcodeFilter = '';      // '' = all, otherwise opcode name
+let wsFrameSearch = '';
 let PROXY_PORT = 7777;
 let LAN_IP = null;
 let TAILSCALE_IP = null;
@@ -789,6 +809,10 @@ function connectWS() {
       captures = captures.filter(c => !ids.has(c.id));
       ids.forEach(id => selectedCaptures.delete(id));
       renderList(); updateSelCount(); applyFilters();
+    } else if (msg.type === 'wsFrame') {
+      onWsFrame(msg.data);
+    } else if (msg.type === 'wsClosed') {
+      onWsClosed(msg.data);
     } else if (msg.type === 'capturePaused') {
       capturePaused = true; updatePauseBtn();
     } else if (msg.type === 'captureResumed') {
@@ -1119,8 +1143,21 @@ async function selectCapture(id, e) {
     // Update local captures cache with full data
     const idx = captures.findIndex(x => x.id === id);
     if (idx !== -1) captures[idx] = { ...captures[idx], ...c };
+    // WebSocket connections default to the Frames tab; reset the cache.
+    if (isWsCapture(c)) {
+      if (inspectorTab !== 'ws-frames') inspectorTab = 'ws-frames';
+      wsFrames = [];
+      wsFramesConnId = id;
+      loadWsFrames(id);
+    } else if (inspectorTab === 'ws-frames') {
+      inspectorTab = 'req-headers';
+    }
     renderInspector(c);
   }
+}
+
+function isWsCapture(c) {
+  return c && (c.method === 'WS' || c.contentType === 'websocket');
 }
 
 function toggleSelect(id, e) {
@@ -1249,10 +1286,13 @@ function renderInspector(c) {
       </div>
     </div>
     <div class="inspector-tabs">
-      <button class="${inspectorTab==='req-headers'?'active':''}" onclick="switchInspTab('req-headers',this)">Req Headers</button>
-      <button class="${inspectorTab==='req-body'?'active':''}" onclick="switchInspTab('req-body',this)">Req Body</button>
-      <button class="${inspectorTab==='res-headers'?'active':''}" onclick="switchInspTab('res-headers',this)">Res Headers</button>
-      <button class="${inspectorTab==='res-body'?'active':''}" onclick="switchInspTab('res-body',this)">Res Body</button>
+      ${isWsCapture(c)
+        ? `<button class="${inspectorTab==='ws-frames'?'active':''}" onclick="switchInspTab('ws-frames',this)">Frames</button>
+           <button class="${inspectorTab==='req-headers'?'active':''}" onclick="switchInspTab('req-headers',this)">Upgrade Headers</button>`
+        : `<button class="${inspectorTab==='req-headers'?'active':''}" onclick="switchInspTab('req-headers',this)">Req Headers</button>
+           <button class="${inspectorTab==='req-body'?'active':''}" onclick="switchInspTab('req-body',this)">Req Body</button>
+           <button class="${inspectorTab==='res-headers'?'active':''}" onclick="switchInspTab('res-headers',this)">Res Headers</button>
+           <button class="${inspectorTab==='res-body'?'active':''}" onclick="switchInspTab('res-body',this)">Res Body</button>`}
     </div>
     <div class="inspector-body" id="insp-body">${renderInspBody(c, inspectorTab)}</div>`;
 }
@@ -1266,11 +1306,115 @@ function switchInspTab(tab, btn) {
 }
 
 function renderInspBody(c, tab) {
+  if (tab === 'ws-frames')   return renderWsFrames(c);
   if (tab === 'req-headers') return headersTable(c.requestHeaders || {});
   if (tab === 'res-headers') return headersTable(c.responseHeaders || {});
   if (tab === 'req-body')    return bodyContent(c.requestBody, '', c.requestEncoding, c.requestBodySize);
   if (tab === 'res-body')    return bodyContent(c.responseBody, c.contentType, c.responseEncoding, c.responseBodySize);
   return '';
+}
+
+// ── WebSocket frame inspector ───────────────────────────────────────────────
+const WS_OPCODE_NAMES = { 0:'continuation', 1:'text', 2:'binary', 8:'close', 9:'ping', 10:'pong' };
+
+async function loadWsFrames(id) {
+  try {
+    const r = await fetch(`/api/captures/${id}/frames`);
+    const data = await r.json();
+    // Guard against a slower request landing after the user moved on.
+    if (wsFramesConnId !== id) return;
+    wsFrames = data.frames || [];
+    if (inspectorCapture && inspectorCapture.id === id && inspectorTab === 'ws-frames') {
+      const body = document.getElementById('insp-body');
+      if (body) body.innerHTML = renderWsFrames(inspectorCapture);
+    }
+  } catch {}
+}
+
+function onWsFrame(frame) {
+  // Live-append a frame if its connection is the one currently open.
+  if (wsFramesConnId !== frame.connectionId) return;
+  wsFrames.push(frame);
+  if (inspectorTab !== 'ws-frames') return;
+  const list = document.getElementById('ws-frame-list');
+  if (!list) {
+    const body = document.getElementById('insp-body');
+    if (body && inspectorCapture) body.innerHTML = renderWsFrames(inspectorCapture);
+    return;
+  }
+  if (wsFrameMatches(frame)) list.insertAdjacentHTML('beforeend', wsFrameHTML(frame));
+}
+
+function onWsClosed(data) {
+  // Update the connection row + inspector header with the final summary.
+  const idx = captures.findIndex(c => c.id === data.id);
+  if (idx !== -1) {
+    captures[idx] = { ...captures[idx], duration: data.duration, responseStatus: data.responseStatus, responseBody: data.responseBody };
+    renderList();
+  }
+  if (inspectorCapture && inspectorCapture.id === data.id) {
+    inspectorCapture = { ...inspectorCapture, duration: data.duration, responseStatus: data.responseStatus, responseBody: data.responseBody };
+    renderInspector(inspectorCapture);
+  }
+}
+
+function wsFrameMatches(f) {
+  if (wsOpcodeFilter && WS_OPCODE_NAMES[f.opcode] !== wsOpcodeFilter) return false;
+  if (wsFrameSearch && !String(f.payload || '').toLowerCase().includes(wsFrameSearch.toLowerCase())) return false;
+  return true;
+}
+
+function setWsOpcodeFilter(v) { wsOpcodeFilter = v; rerenderWsFrameList(); }
+function setWsFrameSearch(v) { wsFrameSearch = v; rerenderWsFrameList(); }
+
+function rerenderWsFrameList() {
+  const list = document.getElementById('ws-frame-list');
+  if (!list) return;
+  list.innerHTML = wsFrames.filter(wsFrameMatches).map(wsFrameHTML).join('') ||
+    '<div style="color:var(--text3);font-size:12px;padding:8px">No frames match</div>';
+}
+
+function renderWsFrames(c) {
+  const opcodes = [...new Set(wsFrames.map(f => WS_OPCODE_NAMES[f.opcode]).filter(Boolean))];
+  const bar = `<div class="ws-frame-bar">
+    <select onchange="setWsOpcodeFilter(this.value)">
+      <option value="">All opcodes</option>
+      ${opcodes.map(o => `<option value="${o}"${o===wsOpcodeFilter?' selected':''}>${o}</option>`).join('')}
+    </select>
+    <input type="text" placeholder="Search payloads…" value="${escHtml(wsFrameSearch)}"
+           oninput="setWsFrameSearch(this.value)" style="flex:1;min-width:120px">
+    <span style="color:var(--text3);font-size:11px">${wsFrames.length} frame${wsFrames.length===1?'':'s'}</span>
+  </div>`;
+  if (!wsFrames.length) {
+    const note = (c && c.responseStatus && c.responseStatus !== 101)
+      ? `Upgrade did not complete (status ${c.responseStatus}).`
+      : 'No frames captured yet…';
+    return `${bar}<div style="color:var(--text3);font-size:12px;padding:8px">${note}</div>`;
+  }
+  const rows = wsFrames.filter(wsFrameMatches).map(wsFrameHTML).join('') ||
+    '<div style="color:var(--text3);font-size:12px;padding:8px">No frames match</div>';
+  return `${bar}<div class="ws-frames" id="ws-frame-list">${rows}</div>`;
+}
+
+function wsFrameHTML(f) {
+  const out = f.direction === 'client→server';
+  const op = WS_OPCODE_NAMES[f.opcode] || `0x${Number(f.opcode).toString(16)}`;
+  const ts = f.timestamp ? new Date(f.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+  let payload = f.payload || '';
+  if (f.isText && (payload.trimStart().startsWith('{') || payload.trimStart().startsWith('['))) {
+    try { payload = JSON.stringify(JSON.parse(payload), null, 2); } catch {}
+  }
+  const kindNote = f.isText ? '' : (f.compressed ? ' · deflated (base64)' : ' · base64');
+  return `<div class="ws-frame dir-${out ? 'out' : 'in'}">
+    <div class="ws-frame-head">
+      <span class="ws-arrow ${out ? 'out' : 'in'}">${out ? '▲ ↑' : '▼ ↓'}</span>
+      <span class="ws-op">${op}</span>
+      <span>${formatBytes(f.payloadSize)}${kindNote}</span>
+      ${f.truncated ? '<span class="ws-trunc">truncated</span>' : ''}
+      <span style="margin-left:auto">${ts}</span>
+    </div>
+    <pre>${escHtml(payload)}</pre>
+  </div>`;
 }
 
 function headersTable(headers) {
