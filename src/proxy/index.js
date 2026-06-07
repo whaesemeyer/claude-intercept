@@ -7,6 +7,14 @@ const tls = require('tls');
 const { URL } = require('url');
 const certManager = require('./cert_manager');
 const { tryDecodeBody, MAX_BODY } = require('./body');
+const { WsFrameParser, OPCODES, parseHandshakeResponse } = require('./ws_frame');
+
+// Per-connection WebSocket capture caps. High-throughput sockets (Slack
+// presence, Discord gateway) can produce thousands of frames/min, so we cap
+// both the number of stored frames and each frame's stored payload to keep the
+// DB from ballooning. PING/PONG control frames are counted but not stored.
+const WS_MAX_FRAMES = 5000;          // stored frames per connection
+const WS_MAX_PAYLOAD_CHARS = 64 * 1024; // stored chars per frame (text or base64)
 
 function deriveDeviceLabel(ip, ua) {
   if (!ip || ip === '127.0.0.1' || ip === '::1') return 'This Mac';
@@ -117,14 +125,18 @@ class ProxyServer {
     await this._forward({ req, res, host, port, path: req.url, isHttps: true });
   }
 
-  // ── WebSocket upgrade (wss://) — transparent tunnel + connection log ──────
+  // ── WebSocket upgrade (wss://) — transparent tunnel + frame capture ───────
   //
   // Cert-pinned single-page apps (Spotify web, Discord) require a working
   // WebSocket upgrade or they hang at the loading state. Node's http.Server
   // emits 'upgrade' instead of 'request' when a client sends Upgrade: websocket.
-  // We can't decrypt frames here without a full RFC 6455 parser; for now we
-  // forward bytes verbatim and log a single capture row per connection so the
-  // dashboard shows the WS happened.
+  // We forward bytes verbatim AND, beside the shuttle, run an RFC 6455 framer
+  // (./ws_frame.js) over both directions so the dashboard can replay what
+  // actually flowed through the socket — not just that a WS connection happened.
+  //
+  // The connection-level row (method 'WS') is inserted up front so individual
+  // frames have a connection_id to link to; it's updated with the final
+  // duration + summary when the socket closes.
 
   _handleWebSocketUpgrade(req, clientSocket, head) {
     const tlsSocket = req.socket;
@@ -135,11 +147,10 @@ class ProxyServer {
     const clientIp = rawIp.replace(/^::ffff:/, '');
     const clientLabel = deriveDeviceLabel(clientIp, req.headers['user-agent']);
 
-    let logged = false;
-    const finalize = (status) => {
-      if (logged || this.paused) return;
-      logged = true;
-      const duration = Date.now() - startMs;
+    // Insert the connection row immediately so frames can reference it. If
+    // capture is paused we leave connectionId null and skip persistence.
+    let connectionId = null;
+    if (!this.paused) {
       const capture = {
         timestamp: startMs,
         method: 'WS',
@@ -150,22 +161,117 @@ class ProxyServer {
         requestBody: '',
         requestEncoding: 'identity',
         requestBodySize: 0,
-        responseStatus: status,
+        responseStatus: 101,
         responseHeaders: {},
-        responseBody: `[WebSocket — duration ${duration}ms]`,
+        responseBody: '[WebSocket — capturing frames…]',
         responseEncoding: 'identity',
         responseBodySize: 0,
         contentType: 'websocket',
-        duration,
+        duration: 0,
         clientIp,
         clientLabel,
       };
       try {
-        const id = this.db.insertCapture(capture);
-        capture.id = id;
+        connectionId = this.db.insertCapture(capture);
+        capture.id = connectionId;
         this.broadcast({ type: 'capture', data: this._serializeCapture(capture) });
       } catch (err) {
         console.error('[proxy] WS capture error:', err.message);
+      }
+    }
+
+    let frameCount = 0;
+    let droppedFrames = 0;
+    let pingPong = 0;
+
+    const recordFrame = (direction, msg) => {
+      if (this.paused || connectionId === null) return;
+
+      // Control frames: count ping/pong but keep them out of the timeline;
+      // close frames are worth keeping (status code + reason).
+      if (msg.isControl) {
+        if (msg.opcode === OPCODES.PING || msg.opcode === OPCODES.PONG) {
+          pingPong++;
+          return;
+        }
+      }
+
+      if (frameCount >= WS_MAX_FRAMES) {
+        droppedFrames++;
+        return;
+      }
+
+      let payload;
+      let isText;
+      if (msg.isText) {
+        payload = msg.payload.toString('utf8');
+        isText = true;
+      } else if (msg.opcode === OPCODES.BINARY || msg.compressed) {
+        // Binary frames, and deflated frames the framer couldn't inflate
+        // (context-takeover streams), are stored as base64.
+        payload = msg.payload.toString('base64');
+        isText = false;
+      } else {
+        // close (and any other non-text control we chose to keep) → hex
+        payload = msg.payload.toString('hex');
+        isText = false;
+      }
+
+      let truncated = msg.truncated;
+      if (payload.length > WS_MAX_PAYLOAD_CHARS) {
+        payload = payload.slice(0, WS_MAX_PAYLOAD_CHARS);
+        truncated = true;
+      }
+
+      const frame = {
+        connectionId,
+        timestamp: Date.now(),
+        direction,
+        opcode: msg.opcode,
+        isText,
+        payload,
+        payloadSize: msg.payload.length,
+        truncated,
+        compressed: !!msg.compressed,
+      };
+      try {
+        frame.id = this.db.insertWsFrame(frame);
+        frameCount++;
+        this.broadcast({ type: 'wsFrame', data: frame });
+      } catch (err) {
+        console.error('[proxy] WS frame error:', err.message);
+      }
+    };
+
+    // The real handshake status (e.g. 101, or 403 when Cloudflare rejects the
+    // upgrade) is read from the upstream's response head once it arrives.
+    let negotiatedStatus = null;
+
+    let finalized = false;
+    const finalize = (status) => {
+      if (finalized) return;
+      finalized = true;
+      if (connectionId === null) return;
+      const duration = Date.now() - startMs;
+      // Prefer the real handshake status; fall back to the close/error status.
+      const finalStatus = negotiatedStatus !== null ? negotiatedStatus : status;
+      const parts = [`${frameCount} frame${frameCount === 1 ? '' : 's'}`];
+      if (droppedFrames) parts.push(`${droppedFrames} dropped (cap)`);
+      if (pingPong) parts.push(`${pingPong} ping/pong`);
+      parts.push(`${duration}ms`);
+      const summary = `[WebSocket — ${parts.join(', ')}]`;
+      try {
+        this.db.finalizeWsCapture(connectionId, {
+          duration,
+          responseBody: summary,
+          responseStatus: finalStatus,
+        });
+        this.broadcast({
+          type: 'wsClosed',
+          data: { id: connectionId, duration, frameCount, responseStatus: finalStatus, responseBody: summary },
+        });
+      } catch (err) {
+        console.error('[proxy] WS finalize error:', err.message);
       }
     };
 
@@ -208,16 +314,77 @@ class ProxyServer {
         return cleanup(0);
       }
 
+      // One framer per direction. Client→server frames are masked, server→
+      // client are not — the parser auto-detects from the MASK bit. We never
+      // touch the bytes being shuttled; the parser only observes copies.
+      //
+      // The framers are created lazily once we've parsed the upstream's
+      // handshake response, because whether permessage-deflate (RFC 7692) is
+      // active — and therefore whether frame payloads are deflated — is only
+      // known from the negotiated `Sec-WebSocket-Extensions` header.
+      let clientToServer = null;
+      let serverToClient = null;
+
+      // The first bytes the upstream sends are the `HTTP/1.1 101 Switching
+      // Protocols` response, not a WS frame. Strip everything up to and
+      // including the header terminator before feeding the framer; the raw
+      // bytes are still forwarded to the client untouched.
+      let handshakeStripped = false;
+      let handshakeBuf = Buffer.alloc(0);
+      // Client frames that arrive before the handshake is parsed (rare) are
+      // held here and replayed once the client→server framer exists.
+      let pendingClient = [];
+
+      const initFramers = (permessageDeflate) => {
+        clientToServer = new WsFrameParser({ permessageDeflate });
+        serverToClient = new WsFrameParser({ permessageDeflate });
+        for (const buf of pendingClient) {
+          for (const msg of clientToServer.push(buf)) recordFrame('client→server', msg);
+        }
+        pendingClient = null;
+      };
+
       // Manual data shuttle (instead of stream.pipe). pipe()'s default
       // end-on-end behavior turns one side's FIN into a write-side close
       // on the other, which on TLSSocket pairs has been observed to
       // truncate WS frames mid-flight.
       upstream.on('data', (chunk) => {
         try { clientSocket.write(chunk); } catch {}
+        try {
+          let frameData = chunk;
+          if (!handshakeStripped) {
+            handshakeBuf = Buffer.concat([handshakeBuf, chunk]);
+            const idx = handshakeBuf.indexOf('\r\n\r\n');
+            if (idx === -1) return; // still reading the handshake response
+            handshakeStripped = true;
+            const head101 = parseHandshakeResponse(handshakeBuf.subarray(0, idx));
+            negotiatedStatus = head101.status || 101;
+            frameData = handshakeBuf.subarray(idx + 4);
+            handshakeBuf = null;
+            initFramers(head101.permessageDeflate);
+          }
+          for (const msg of serverToClient.push(frameData)) {
+            recordFrame('server→client', msg);
+          }
+        } catch (err) {
+          console.error('[proxy] WS parse error (s→c):', err.message);
+        }
       });
       clientSocket.on('data', (chunk) => {
         try { upstream.write(chunk); } catch {}
+        try {
+          if (!clientToServer) { pendingClient.push(Buffer.from(chunk)); return; }
+          for (const msg of clientToServer.push(chunk)) {
+            recordFrame('client→server', msg);
+          }
+        } catch (err) {
+          console.error('[proxy] WS parse error (c→s):', err.message);
+        }
       });
+
+      // Any client bytes that arrived alongside the upgrade headers (rare —
+      // clients usually wait for the 101) are buffered until the framer exists.
+      if (head && head.length > 0) pendingClient.push(Buffer.from(head));
     });
   }
 

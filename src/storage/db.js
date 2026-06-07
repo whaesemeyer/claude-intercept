@@ -38,6 +38,29 @@ function init() {
     CREATE INDEX IF NOT EXISTS idx_timestamp ON captures(timestamp);
   `);
 
+  // WebSocket frames: one row per application/control frame, linked back to the
+  // connection-level row in `captures` (method 'WS') via connection_id. This
+  // keeps the dashboard's "one row per request" model intact — the connection
+  // is the request, frames expand inline underneath it.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ws_frames (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      connection_id INTEGER NOT NULL,
+      timestamp     INTEGER NOT NULL,
+      direction     TEXT    NOT NULL,   -- 'client→server' | 'server→client'
+      opcode        INTEGER NOT NULL,   -- RFC 6455 opcode
+      is_text       INTEGER NOT NULL,   -- 1 = utf-8 text, 0 = base64/hex
+      payload       TEXT,
+      payload_size  INTEGER,            -- decoded byte length on the wire
+      truncated     INTEGER DEFAULT 0,
+      compressed    INTEGER DEFAULT 0   -- 1 = deflated bytes we couldn't inflate
+    );
+    CREATE INDEX IF NOT EXISTS idx_ws_conn ON ws_frames(connection_id);
+  `);
+
+  // Migration: add compressed column to ws_frames on pre-existing DBs.
+  try { db.exec("ALTER TABLE ws_frames ADD COLUMN compressed INTEGER DEFAULT 0"); } catch {}
+
   // Migration: add device columns (safe to run on existing DBs — errors = column already exists)
   try { db.exec("ALTER TABLE captures ADD COLUMN client_ip TEXT"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN client_label TEXT"); } catch {}
@@ -172,11 +195,70 @@ function getCaptureById(id) {
 
 function clearCaptures() {
   db.prepare('DELETE FROM captures').run();
+  db.prepare('DELETE FROM ws_frames').run();
 }
 
 function deleteCaptures(ids) {
   const placeholders = ids.map(() => '?').join(',');
   db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids);
+  db.prepare(`DELETE FROM ws_frames WHERE connection_id IN (${placeholders})`).run(...ids);
+}
+
+// ── WebSocket frames ───────────────────────────────────────────────────────
+
+function insertWsFrame(frame) {
+  const stmt = db.prepare(`
+    INSERT INTO ws_frames
+      (connection_id, timestamp, direction, opcode, is_text, payload, payload_size, truncated, compressed)
+    VALUES
+      ($connectionId, $timestamp, $direction, $opcode, $isText, $payload, $payloadSize, $truncated, $compressed)
+  `);
+  const result = stmt.run({
+    $connectionId: frame.connectionId,
+    $timestamp: frame.timestamp,
+    $direction: frame.direction,
+    $opcode: frame.opcode,
+    $isText: frame.isText ? 1 : 0,
+    $payload: frame.payload || '',
+    $payloadSize: frame.payloadSize || 0,
+    $truncated: frame.truncated ? 1 : 0,
+    $compressed: frame.compressed ? 1 : 0,
+  });
+  return Number(result.lastInsertRowid);
+}
+
+function getWsFrames(connectionId, { limit = 5000, offset = 0 } = {}) {
+  return db
+    .prepare(
+      `SELECT * FROM ws_frames WHERE connection_id = $id
+       ORDER BY id ASC LIMIT $limit OFFSET $offset`
+    )
+    .all({ $id: connectionId, $limit: limit, $offset: offset })
+    .map(parseFrameRow);
+}
+
+function getWsFrameCount(connectionId) {
+  const row = db
+    .prepare('SELECT COUNT(*) as n FROM ws_frames WHERE connection_id = $id')
+    .get({ $id: connectionId });
+  return Number(row?.n || 0);
+}
+
+// Update the connection-level row once the WS closes — final duration plus a
+// human summary in place of the "[capturing frames…]" placeholder.
+function finalizeWsCapture(id, { duration, responseBody, responseStatus }) {
+  db.prepare(
+    `UPDATE captures
+       SET duration_ms = $duration,
+           response_body = $responseBody,
+           response_status = $responseStatus
+     WHERE id = $id`
+  ).run({
+    $id: id,
+    $duration: duration || 0,
+    $responseBody: responseBody || '',
+    $responseStatus: responseStatus || 101,
+  });
 }
 
 function getStats() {
@@ -220,6 +302,21 @@ function parseRow(row) {
   };
 }
 
+function parseFrameRow(row) {
+  return {
+    id: Number(row.id),
+    connectionId: Number(row.connection_id),
+    timestamp: Number(row.timestamp),
+    direction: row.direction,
+    opcode: Number(row.opcode),
+    isText: !!row.is_text,
+    payload: row.payload,
+    payloadSize: Number(row.payload_size || 0),
+    truncated: !!row.truncated,
+    compressed: !!row.compressed,
+  };
+}
+
 function getDevices() {
   return db
     .prepare("SELECT DISTINCT client_label FROM captures WHERE client_label != '' ORDER BY client_label")
@@ -231,4 +328,8 @@ function tryParse(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
 }
 
-module.exports = { init, insertCapture, queryCaptures, getCaptureById, clearCaptures, deleteCaptures, getStats, getDevices };
+module.exports = {
+  init, insertCapture, queryCaptures, getCaptureById, clearCaptures, deleteCaptures,
+  getStats, getDevices,
+  insertWsFrame, getWsFrames, getWsFrameCount, finalizeWsCapture,
+};
