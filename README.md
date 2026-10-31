@@ -1,6 +1,6 @@
 # ⊕ Claude Intercept
 
-A lightweight MITM (man-in-the-middle) proxy for capturing and analyzing HTTP/S traffic — built for use with [Claude Code](https://claude.ai/code).
+A lightweight MITM (man-in-the-middle) proxy for capturing and analyzing HTTP/S traffic — built for use with [Claude Code](https://claude.ai/code) and [Codex](https://developers.openai.com/codex).
 
 Capture traffic from your Mac, iPhone, Android, or any device on your network. Inspect it in a real-time dark-themed dashboard, then feed it directly to Claude for analysis: document undiscovered APIs, extract auth tokens, map request patterns, and more.
 
@@ -16,7 +16,7 @@ Capture traffic from your Mac, iPhone, Android, or any device on your network. I
 - **Device labeling** — each request tagged with its source (This Mac, iPhone, iPad, Android, etc.) with a Device filter dropdown
 - **Bulk actions** — select, export, or delete multiple requests at once
 - **Pause / resume** — stop capturing without interrupting device internet access
-- **Claude Code `/intercept` skill** — start, analyze, and export from the terminal without touching the browser
+- **Claude Code `/intercept` and Codex `$intercept` skill** — start, analyze, and export from the terminal without touching the browser
 - **Export modes** — `api-docs`, `auth`, `summary`, `full` — structured output optimized for Claude analysis
 - **QR code cert install** — scan to install the CA cert on iOS/Android, no typing required
 - **Tailscale support** — detects and displays your Tailscale IP for remote device access
@@ -26,16 +26,16 @@ Capture traffic from your Mac, iPhone, Android, or any device on your network. I
 
 ## Requirements
 
-- **Node.js v22.5+** (uses built-in `node:sqlite` — no native compilation needed)
+- **Node.js v22.15+** (uses built-in `node:sqlite` — no native compilation needed)
 - **macOS or Linux (GNOME/KDE)** for the one-click system-proxy toggle + automated certificate trust; Windows is manual proxy config
-- **Claude Code** for the `/intercept` skill (optional but recommended)
+- **Claude Code or Codex** for agent-driven capture and analysis (optional; the CLI works independently)
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/claude-intercept.git ~/claude_intercept
+git clone https://github.com/whaesemeyer/claude-intercept.git ~/claude_intercept
 cd ~/claude_intercept
 bash install.sh
 ```
@@ -43,8 +43,26 @@ bash install.sh
 The installer:
 - Verifies Node.js version
 - Runs `npm install`
-- Installs the `/intercept` Claude Code skill
+- Installs a shared Intercept skill for Claude Code and Codex
 - Links `claude-intercept` to your PATH
+
+Choose one agent, or add skills to an existing installation without reinstalling
+dependencies or changing global links:
+
+```bash
+bash install.sh --agent codex
+bash install.sh --agent claude
+bash install.sh --skills-only --agent codex
+```
+
+The default is `--agent both`. Claude Code receives
+`~/.claude/skills/intercept/SKILL.md`; Codex receives
+`~/.agents/skills/intercept/SKILL.md`, its documented user skill location.
+See [Codex skill discovery](https://learn.chatgpt.com/docs/build-skills).
+Commands are rendered with the absolute checkout path, so either agent can
+invoke the CLI from another directory. Re-run the installer after moving the
+checkout or updating the skill. Reinstallation replaces this skill's `SKILL.md`;
+other skills and agent configuration are left alone.
 
 ---
 
@@ -58,7 +76,27 @@ In any Claude Code session:
 ```
 Claude will start the proxy, open the dashboard, and guide you through setup.
 
-### Option B — CLI
+### Option B — Codex skill
+
+In Codex, invoke:
+
+```text
+$intercept capture traffic from my browser
+```
+
+You can also select it with `/skills`. Restart Codex if the newly installed
+skill is not listed. The skill uses `start --daemon --no-open`, JSON status,
+and host-filtered exports through the local CLI. No Claude installation, model
+API key, or MCP configuration is needed. Local shell and network access are
+required; a remote Codex environment cannot capture your local browser unless
+you explicitly route its traffic to that proxy.
+
+For example: `$intercept capture a fresh LinkedIn messaging session and verify
+that the new requests succeed`. The skill checks capture timestamps and keeps
+credential values out of chat. Installing a skill alone does not enable the
+system proxy or install certificate trust.
+
+### Option C — CLI
 
 ```bash
 claude-intercept start
@@ -228,7 +266,8 @@ claude_intercept/
 │       └── public/
 │           └── index.html  # Single-file dashboard (vanilla JS, dark theme)
 ├── skill.md                # Claude Code /intercept skill definition
-├── install.sh              # Installer (deps, skill, PATH link)
+├── scripts/install-skills.js # Shared Claude Code/Codex skill installer
+├── install.sh              # Installer (deps, skills, PATH link)
 ├── captures/               # Runtime — SQLite DB (gitignored)
 └── certs/                  # Runtime — CA + leaf keys (gitignored)
 ```
