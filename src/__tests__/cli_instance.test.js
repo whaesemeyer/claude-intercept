@@ -155,6 +155,32 @@ test('CA trust commands fail when unsupported or incomplete', t => {
   }
 });
 
+test('export forwards the baseline capture ID to storage', t => {
+  const { root, cli, env } = fixture(t);
+  const recordPath = path.join(root, 'query-options.json');
+  fs.writeFileSync(path.join(root, 'src/storage/db.js'), `
+    const fs = require('node:fs');
+    module.exports = {
+      init() {},
+      queryCaptures(options) {
+        fs.writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify(options));
+        return { rows: [{ id: 43, host: 'api.example.com', method: 'GET' }] };
+      }
+    };
+  `);
+  fs.writeFileSync(path.join(root, 'src/analyze.js'),
+    "module.exports = { buildClaudeExport() { return 'fresh capture'; } };\n");
+  const result = run(cli, env, [
+    'export', '--mode', 'summary', '--host', 'api.example.com', '--after-id', '42',
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /fresh capture/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(recordPath, 'utf8')), {
+    host: 'api.example.com', limit: 100, offset: 0, afterId: 42,
+    summaryOnly: true,
+  });
+});
+
 test('proxy off reports ownership refusal as a command failure', t => {
   const { root, cli, env } = fixture(t);
   fs.writeFileSync(path.join(root, 'src/system_proxy.js'),

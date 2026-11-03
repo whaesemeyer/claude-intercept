@@ -133,6 +133,7 @@ claude-intercept <command> [options]
 | `export` or `export --mode summary` | High-level traffic overview (default; excludes raw URLs, headers, and bodies) |
 | `export --mode full --host api.example.com` | Full headers + bodies for one host |
 | `export --device iPhone` | Only captures from a given device (see `devices`) |
+| `export --after-id 42` | Only captures newer than capture ID 42; use `status --json` to record `stats.lastId` before a test |
 | `export --mode summary --json` | Aggregate JSON without captured headers, bodies, or URLs |
 | `export --mode api-docs --json` | Structured endpoint JSON with header names and body structure, without header or body values |
 | `export --mode auth --json` | JSON-wrapped credential findings, without unrelated raw captures |

@@ -81,21 +81,27 @@ On a headless Linux host, `proxy on` prints manual environment configuration
 instead of changing desktop settings. For phones, use the dashboard's
 device-specific certificate and proxy instructions.
 
-Ask the user to load the target page or perform the intended action, then verify
-new captures for that host. Check timestamps: old stored cookies are not proof
+Just before the target action, run `{{CLI}} status --json` and note
+`stats.lastId` as the baseline. Ask the user to load the page or perform the
+action, then verify new captures for that host. Old stored cookies are not proof
 that the newly signed-in session was captured.
 
 ## Analyze or export
 
 Use bounded, host-filtered summary output for the initial inspection; add
-`--device` when relevant:
+`--device` when relevant and `--after-id` with the baseline ID for a fresh
+capture request:
 
 ```bash
 {{CLI}} devices --json
-{{CLI}} export --mode summary --host api.example.com --limit 50 --json
+{{CLI}} export --mode summary --host api.example.com --after-id 42 --limit 50 --json
 ```
 
-Replace the example host with the requested host. JSON summary mode returns
+Replace the example host and `42` with the requested host and the recorded
+`stats.lastId`. If no matching rows appear, do not infer success from older
+captures. HTTP status classes show request outcomes; confirm an authenticated
+session through a relevant account-specific response or the user's observation.
+JSON summary mode returns
 aggregate counts without captured headers, bodies, or URLs. For API docs,
 authentication, or full detail, redirect output to a local file under
 `umask 077` rather than printing it in the shell tool output. API documentation

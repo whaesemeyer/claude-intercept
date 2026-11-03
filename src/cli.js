@@ -165,7 +165,7 @@ function parsePort(value, label = 'Port') {
   return port;
 }
 
-function parseExportOptions({ mode, limit, offset = '0', json = false }) {
+function parseExportOptions({ mode, limit, offset = '0', afterId, json = false }) {
   if (!EXPORT_MODES.has(mode)) {
     throw new RangeError(`Unknown export mode: ${mode}`);
   }
@@ -180,7 +180,15 @@ function parseExportOptions({ mode, limit, offset = '0', json = false }) {
   if (!Number.isSafeInteger(start) || start < 0) {
     throw new RangeError('Export offset must be a nonnegative integer');
   }
-  return { mode, limit: count, offset: start };
+  let baseline;
+  if (afterId !== undefined) {
+    if (!/^(0|[1-9]\d*)$/.test(String(afterId)) ||
+        !Number.isSafeInteger(Number(afterId))) {
+      throw new RangeError('Export after-id must be a nonnegative integer');
+    }
+    baseline = Number(afterId);
+  }
+  return { mode, limit: count, offset: start, ...(baseline === undefined ? {} : { afterId: baseline }) };
 }
 
 function dashboardOpenCommand(platform, url) {
@@ -508,6 +516,7 @@ program
   .option('--device <label>', 'Filter by device label (see "devices")')
   .option('--limit <n>', 'Max captures (mode-specific limit)')
   .option('--offset <n>', 'Skip newest matching captures', '0')
+  .option('--after-id <id>', 'Only captures recorded after this capture ID')
   .option('--json', 'Emit structured JSON instead of Markdown (for agents/scripts)')
   .action((opts) => {
     let exportOptions;
@@ -526,6 +535,7 @@ program
       device: opts.device,
       limit: exportOptions.limit,
       offset: exportOptions.offset,
+      afterId: exportOptions.afterId,
       summaryOnly: exportOptions.mode === 'summary',
     });
     if (opts.json) {
