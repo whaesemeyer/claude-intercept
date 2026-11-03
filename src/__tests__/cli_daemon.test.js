@@ -2,7 +2,9 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { daemonChildArgs, parseExportOptions, parsePort } = require('../cli');
+const { EventEmitter } = require('node:events');
+const { daemonChildArgs, parseExportOptions, parsePort,
+  dashboardOpenCommand, openDashboard } = require('../cli');
 
 const CLI = '/abs/path/to/cli.js';
 
@@ -55,4 +57,18 @@ test('ports require exact integers in the valid TCP range', () => {
   for (const value of ['0', '-1', '65536', '7777junk', '1.5', 'NaN']) {
     assert.throws(() => parsePort(value, 'Proxy port'), /Proxy port must be/);
   }
+});
+
+test('dashboard opener uses an executable on Windows and handles missing desktop opener', t => {
+  const url = 'http://127.0.0.1:7778';
+  assert.deepStrictEqual(dashboardOpenCommand('win32', url), {
+    command: 'cmd.exe', args: ['/d', '/s', '/c', `start "" "${url}"`],
+  });
+  const warnings = [];
+  t.mock.method(console, 'warn', message => warnings.push(message));
+  const child = new EventEmitter();
+  child.unref = () => {};
+  openDashboard(url, () => child);
+  assert.doesNotThrow(() => child.emit('error', new Error('opener missing')));
+  assert.match(warnings[0], /Could not open dashboard: opener missing/);
 });

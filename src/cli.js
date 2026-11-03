@@ -176,6 +176,25 @@ function parseExportOptions({ mode, limit }) {
   return { mode, limit: count };
 }
 
+function dashboardOpenCommand(platform, url) {
+  if (platform === 'darwin') return { command: 'open', args: [url] };
+  if (platform === 'win32') {
+    return { command: 'cmd.exe', args: ['/d', '/s', '/c', `start "" "${url}"`] };
+  }
+  return { command: 'xdg-open', args: [url] };
+}
+
+function openDashboard(url, spawn = require('node:child_process').spawn) {
+  const { command, args } = dashboardOpenCommand(process.platform, url);
+  try {
+    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', err => console.warn(`[intercept] Could not open dashboard: ${err.message}`));
+    child.unref();
+  } catch (err) {
+    console.warn(`[intercept] Could not open dashboard: ${err.message}`);
+  }
+}
+
 // ── Shared startup ────────────────────────────────────────────────────────────
 async function startIntercept({ proxyPort, uiPort, open: autoOpen, lan = false }) {
   const existing = await inspectInstance();
@@ -233,8 +252,7 @@ async function startIntercept({ proxyPort, uiPort, open: autoOpen, lan = false }
   console.log(chalk.dim('  Ctrl+C to stop\n'));
 
   if (autoOpen) {
-    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-    require('child_process').spawn(opener, [`http://127.0.0.1:${uiPort}`], { detached: true, stdio: 'ignore' });
+    openDashboard(`http://127.0.0.1:${uiPort}`);
   }
 
   // Graceful shutdown
@@ -697,7 +715,7 @@ if (require.main === module) {
   }
 }
 
-module.exports = { daemonChildArgs, parseExportOptions, parsePort };
+module.exports = { daemonChildArgs, parseExportOptions, parsePort, dashboardOpenCommand, openDashboard };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getLocalIP() {
