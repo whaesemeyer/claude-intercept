@@ -44,6 +44,10 @@ test('dashboard listens on loopback and rejects cross-origin and rebinding reque
   assert.equal(status.headers['x-content-type-options'], 'nosniff');
   assert.match(status.headers['content-security-policy'], /frame-ancestors 'none'/);
   const page = await request(port, '/');
+  assert.equal(page.status, 200);
+  const nestedPage = await request(port, '/settings/local');
+  assert.equal(nestedPage.status, 200);
+  assert.equal(nestedPage.body, page.body);
   const script = page.body.match(/<script>([\s\S]*?)<\/script>/i);
   assert.ok(script);
   const hash = crypto.createHash('sha256').update(script[1]).digest('base64');
@@ -172,6 +176,30 @@ test('WebSocket frame history is paged and only available for valid WS captures'
   assert.equal(JSON.parse(tail.body).offset, 130);
   assert.deepEqual(frameQuery, { limit: 50, offset: 130 });
   assert.ok(captureQueries.every(options => options?.summaryOnly === true));
+});
+
+test('batch deletion handles an absent JSON body under Express 5', async t => {
+  const deleted = [];
+  t.mock.method(db, 'deleteCaptures', ids => { deleted.push(ids); return ids.length; });
+  const ui = createUIServer({ uiPort: 0 });
+  t.after(() => ui.close());
+  const port = await ui.listen();
+  const url = `http://127.0.0.1:${port}/api/captures/batch`;
+
+  const missing = await fetch(url, {
+    method: 'DELETE', headers: { 'X-Claude-Intercept-Action': '1' },
+  });
+  assert.equal(missing.status, 400);
+  assert.deepEqual(deleted, []);
+
+  const valid = await fetch(url, {
+    method: 'DELETE', headers: {
+      'Content-Type': 'application/json', 'X-Claude-Intercept-Action': '1',
+    },
+    body: JSON.stringify({ ids: [1, 2] }),
+  });
+  assert.equal(valid.status, 200);
+  assert.deepEqual(deleted, [[1, 2]]);
 });
 
 test('LAN clients can download only the public CA certificate', () => {

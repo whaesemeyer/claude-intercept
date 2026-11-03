@@ -15,7 +15,9 @@ if (!['claude', 'codex', 'both'].includes(agent) || process.argv.length !== 3) {
 }
 const root = path.resolve(__dirname, '..');
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
-const cli = `node ${quote(path.join(root, 'src/cli.js'))}`;
+// Codex desktop may not inherit the PATH used by the terminal that ran this
+// installer. Bind the skill to the verified Node executable used right now.
+const cli = `${quote(process.execPath)} ${quote(path.join(root, 'src/cli.js'))}`;
 const template = fs.readFileSync(path.join(root, 'skill.md'), 'utf8');
 const rendered = template.replaceAll('{{CLI}}', () => cli);
 const targets = {
@@ -23,16 +25,23 @@ const targets = {
   codex: '.agents',
 };
 const destinations = (agent === 'both' ? Object.keys(targets) : [agent]).map(name => {
-  const dir = path.join(os.homedir(), targets[name], 'skills', 'intercept');
-  return { name, dir, target: path.join(dir, 'SKILL.md') };
+  const agentDir = path.join(os.homedir(), targets[name]);
+  const skillsDir = path.join(agentDir, 'skills');
+  const dir = path.join(skillsDir, 'intercept');
+  return { name, directories: [agentDir, skillsDir, dir], dir, target: path.join(dir, 'SKILL.md') };
 });
 
 // Preflight both destinations before overwriting either skill. Refuse links so
 // an installer run cannot redirect a write outside the requested skill path.
-for (const { dir, target } of destinations) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (!fs.lstatSync(dir).isDirectory()) {
-    throw new Error(`Skill directory is not a regular directory: ${dir}`);
+for (const { directories, dir, target } of destinations) {
+  for (const directory of directories) {
+    if (!fs.lstatSync(directory, { throwIfNoEntry: false })) {
+      try { fs.mkdirSync(directory, { mode: 0o700 }); }
+      catch (err) { if (err.code !== 'EEXIST') throw err; }
+    }
+    if (!fs.lstatSync(directory).isDirectory()) {
+      throw new Error(`Skill path is not a regular directory: ${directory}`);
+    }
   }
   fs.chmodSync(dir, 0o700);
   const current = fs.lstatSync(target, { throwIfNoEntry: false });

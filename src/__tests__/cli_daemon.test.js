@@ -60,6 +60,11 @@ test('export rejects invalid modes and unbounded limits before opening captures'
   for (const offset of ['-1', '1.5', 'NaN', '3junk']) {
     assert.throws(() => parseExportOptions({ mode: 'summary', offset }), /Export offset/);
   }
+  assert.deepStrictEqual(parseExportOptions({ mode: 'summary', afterId: '42' }),
+    { mode: 'summary', limit: 100, offset: 0, afterId: 42 });
+  for (const afterId of ['-1', '1.5', 'NaN', '3junk', '01', '9007199254740992']) {
+    assert.throws(() => parseExportOptions({ mode: 'summary', afterId }), /Export after-id/);
+  }
 });
 
 test('ports require exact integers in the valid TCP range', () => {
