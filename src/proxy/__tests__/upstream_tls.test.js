@@ -66,7 +66,7 @@ test('HTTPS and WebSocket forwarding reject an untrusted upstream certificate', 
       proxy._handleWebSocketUpgrade({
         method: 'GET',
         url: '/',
-        headers: { host: '127.0.0.1' },
+        headers: { host: '127.0.0.1', connection: 'Upgrade', upgrade: 'websocket' },
         socket: { _interceptHost: '127.0.0.1', _interceptPort: port },
       }, clientSocket, Buffer.alloc(0));
       await Promise.race([

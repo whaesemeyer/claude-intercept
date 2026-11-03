@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const zlib = require('node:zlib');
-const { tryDecodeBody } = require('../body');
+const { tryDecodeBody, MAX_BODY } = require('../body');
 
 const json = JSON.stringify({ hello: 'world', n: 42 });
 
@@ -28,6 +28,13 @@ test('gzip JSON decompresses', () => {
   assert.strictEqual(r.text, json);
   assert.strictEqual(r.encoding, 'gzip');
   assert.strictEqual(r.originalSize, gz.length);
+});
+
+test('compressed bodies cannot expand beyond the capture limit', () => {
+  const bomb = zlib.gzipSync(Buffer.alloc(MAX_BODY + 100_000, 0x61));
+  const result = tryDecodeBody(bomb, 'text/plain', 'gzip');
+  assert.match(result.text, /^<decompressed body exceeds \d+ byte capture limit>$/);
+  assert.strictEqual(result.originalSize, bomb.length);
 });
 
 test('brotli JSON decompresses', () => {
