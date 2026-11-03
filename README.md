@@ -133,8 +133,8 @@ claude-intercept <command> [options]
 | `export --device iPhone` | Only captures from a given device (see `devices`) |
 | `export --mode summary --json` | Aggregate JSON without captured headers, bodies, or URLs |
 | `export --mode full --json` | Raw capture JSON, including any credentials present |
-| `proxy on` | Enable system proxy on this Mac |
-| `proxy off` | Disable system proxy |
+| `proxy on` | Enable system proxy for a running Intercept instance on macOS or GNOME/KDE; refuses an unrelated active proxy |
+| `proxy off` | Disable only Intercept-owned system proxy settings |
 | `proxy status` | Show current system proxy state (`--json` for machine-readable) |
 
 ---
@@ -147,7 +147,9 @@ claude-intercept <command> [options]
 2. Click **Enable for This Mac** — macOS will prompt for your password
 3. Browse normally — all HTTP/S traffic is now captured
 
-> **Remember to disable** when done (`proxy off` or the Disable button in the dashboard). Leaving the proxy on after stopping the server will break your network connection.
+Normal shutdown disables only system proxy settings still owned by this
+Intercept instance. If the machine or process exits unexpectedly, run
+`proxy off` before using a direct connection.
 
 ### This Machine (Linux — GNOME / KDE)
 
@@ -214,6 +216,13 @@ sudo security add-trusted-cert -d -r trustRoot \
   ~/claude_intercept/certs/ca.crt
 ```
 
+### Windows (manual)
+
+Set the system or browser HTTP and HTTPS proxy to `127.0.0.1:7777`, then
+import `certs/ca.crt` into the trusted root certificate store. Automatic
+`proxy on` and `proxy off` are unavailable on Windows because this tool cannot
+yet verify and preserve every existing Windows proxy setting.
+
 ### Firefox
 
 Firefox uses its own cert store. Install via:
@@ -277,7 +286,7 @@ claude_intercept/
 │   ├── cli.js              # Commander-based CLI entry point
 │   ├── analyze.js          # Export formatter for Claude (api-docs / auth / summary / full)
 │   ├── setup_wizard.js     # Per-platform setup instructions
-│   ├── system_proxy.js     # macOS/Linux/Windows system proxy toggle
+│   ├── system_proxy.js     # macOS/Linux system proxy toggle; Windows manual
 │   ├── proxy/
 │   │   ├── index.js        # MITM proxy — HTTP forward + CONNECT tunnel + TLS unwrap
 │   │   └── cert_manager.js # CA generation + per-host certificate signing (node-forge)
