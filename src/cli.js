@@ -58,6 +58,22 @@ function removePidRecordIfSame(record) {
   } catch {}
 }
 
+function sameInstanceRecord(current, record) {
+  return current && !current.invalid && !current.legacy &&
+    current.pid === record.pid && current.token === record.token &&
+    current.controlPath === record.controlPath;
+}
+
+async function waitForInstanceStop(record, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (sameInstanceRecord(readPidRecord(), record)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Instance ${record.pid} did not finish shutting down within ${timeoutMs}ms`);
+    }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+}
+
 function controlRequest(record, command, timeoutMs = 700) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(record.controlPath);
@@ -430,7 +446,8 @@ program
     try {
       const response = await controlRequest(state.record, 'stop');
       if (response.ok !== true || response.pid !== state.pid) throw new Error('Instance did not confirm shutdown');
-      console.log(chalk.green(`  Stopping Intercept (PID ${state.pid})`));
+      await waitForInstanceStop(state.record);
+      console.log(chalk.green(`  Stopped Intercept (PID ${state.pid})`));
     } catch (err) {
       console.error(chalk.red(`  Could not stop Intercept: ${err.message}`));
       process.exitCode = 1;
