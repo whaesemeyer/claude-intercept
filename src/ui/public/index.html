@@ -156,21 +156,6 @@
   .method-DELETE { background: rgba(248,81,73,.15);  color: var(--delete); border: 1px solid rgba(248,81,73,.3); }
   .method-PATCH  { background: rgba(163,113,247,.15);color: var(--patch);  border: 1px solid rgba(163,113,247,.3); }
   .method-OPTIONS{ background: rgba(139,148,158,.1); color: var(--options);border: 1px solid rgba(139,148,158,.2); }
-  .method-WS     { background: rgba(46,160,67,.15);  color: #2ecc71;       border: 1px solid rgba(46,160,67,.35); }
-  /* WebSocket frame list (inspector) */
-  .ws-frames { display: flex; flex-direction: column; gap: 4px; }
-  .ws-frame { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; background: var(--bg2); }
-  .ws-frame.dir-out { border-left: 2px solid var(--post); }
-  .ws-frame.dir-in  { border-left: 2px solid var(--get); }
-  .ws-frame-head { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--text3); margin-bottom: 4px; }
-  .ws-arrow { font-family: var(--font-mono); font-weight: 700; }
-  .ws-arrow.out { color: var(--post); }
-  .ws-arrow.in  { color: var(--get); }
-  .ws-op { font-family: var(--font-mono); text-transform: uppercase; letter-spacing: .3px; }
-  .ws-frame pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 11px; color: var(--text2); max-height: 240px; overflow: auto; }
-  .ws-frame-bar { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
-  .ws-frame-bar input, .ws-frame-bar select { font-size: 11px; padding: 3px 6px; background: var(--bg2); color: var(--text); border: 1px solid var(--border); border-radius: 4px; }
-  .ws-trunc { color: var(--put); font-size: 10px; }
   .status-badge { font-family: var(--font-mono); font-size: 11px; font-weight: 600; min-width: 32px; text-align: center; flex-shrink: 0; }
   .s-2xx { color: var(--s2xx); } .s-3xx { color: var(--s3xx); }
   .s-4xx { color: var(--s4xx); } .s-5xx { color: var(--s5xx); } .s-0 { color: var(--text3); }
@@ -188,6 +173,10 @@
   .inspector-header .meta-line { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--text3); }
   .inspector-tabs { display: flex; border-bottom: 1px solid var(--border2); background: var(--surface); flex-shrink: 0; }
   .inspector-tabs button { background: none; border: none; color: var(--text2); padding: 6px 12px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .ws-frame { border-bottom: 1px solid var(--border2); padding: 8px 0; }
+  .ws-frame pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+  .ws-frame-meta { color: var(--text3); font-size: 11px; margin-bottom: 4px; }
+  .ws-page { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--text3); font-size: 11px; }
   .inspector-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
   .inspector-tabs button:hover { color: var(--text); }
   .inspector-body { flex: 1; overflow-y: auto; padding: 12px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
@@ -452,7 +441,7 @@
     <span id="stat-total">0 requests</span>
     <span id="stat-hosts">0 hosts</span>
     <span id="proxy-port-label">:7777</span>
-    <button id="btn-pause" class="rec-btn recording" onclick="togglePause()">
+    <button id="btn-pause" class="rec-btn recording">
       <span class="rec-dot"></span>
       <span id="pause-label">Recording</span>
     </button>
@@ -460,9 +449,9 @@
 </header>
 
 <nav id="main-nav">
-  <button class="active" onclick="showTab('traffic', this)">Traffic</button>
-  <button onclick="showTab('export', this)">Export for Claude</button>
-  <button onclick="showTab('setup', this)">Setup &amp; Certs</button>
+  <button class="active" data-tab="traffic">Traffic</button>
+  <button data-tab="export">Export for Claude</button>
+  <button data-tab="setup">Setup &amp; Certs</button>
 </nav>
 
 <main>
@@ -471,32 +460,32 @@
     <div class="traffic-layout">
       <div class="traffic-left">
         <div class="filter-bar">
-          <input type="search" id="f-search" placeholder="Search URL, body…" oninput="applyFilters()">
-          <input type="text" id="f-host" placeholder="Host" style="width:120px" oninput="applyFilters()">
-          <select id="f-method" onchange="applyFilters()">
+          <input type="search" id="f-search" placeholder="Search URL, body…">
+          <input type="text" id="f-host" placeholder="Host" style="width:120px">
+          <select id="f-method">
             <option value="">All Methods</option>
             <option>GET</option><option>POST</option><option>PUT</option>
             <option>DELETE</option><option>PATCH</option><option>OPTIONS</option>
           </select>
-          <select id="f-status" onchange="applyFilters()">
+          <select id="f-status">
             <option value="">All Statuses</option>
             <option value="2xx">2xx Success</option><option value="3xx">3xx Redirect</option>
             <option value="4xx">4xx Error</option><option value="5xx">5xx Server Error</option>
           </select>
-          <select id="f-device" onchange="applyFilters()" style="width:120px">
+          <select id="f-device" style="width:120px">
             <option value="">All Devices</option>
           </select>
         </div>
         <div class="filter-bar" style="border-top:none;padding-top:4px;padding-bottom:4px;gap:6px;align-items:center">
           <span id="filter-match-count" style="font-size:11px;color:var(--text3);min-width:70px"></span>
-          <button class="btn" onclick="selectAll()">Select All</button>
-          <button class="btn" onclick="selectFiltered()" id="btn-sel-filtered" title="Select rows matching current filters" style="display:none">Select Filtered</button>
-          <button class="btn" onclick="clearSelection()" id="btn-deselect" style="display:none">Deselect All</button>
+          <button class="btn" id="btn-select-all">Select All</button>
+          <button class="btn" id="btn-sel-filtered" title="Select rows matching current filters" style="display:none">Select Filtered</button>
+          <button class="btn" id="btn-deselect" style="display:none">Deselect All</button>
           <span class="selected-count" id="sel-count"></span>
           <div style="flex:1"></div>
-          <button class="btn primary" onclick="exportSelected()" id="btn-export-sel" style="display:none">Export Selected →</button>
-          <button class="btn danger" onclick="deleteSelected()" id="btn-delete-sel" style="display:none">Delete Selected</button>
-          <button class="btn danger" onclick="clearCaptures()" style="border-color:var(--border);color:var(--text3)" title="Clear all captures">Clear All</button>
+          <button class="btn primary" id="btn-export-sel" style="display:none">Export Selected →</button>
+          <button class="btn danger" id="btn-delete-sel" style="display:none">Delete Selected</button>
+          <button class="btn danger" id="btn-clear-captures" style="border-color:var(--border);color:var(--text3)" title="Clear all captures">Clear All</button>
         </div>
         <div class="traffic-list" id="traffic-list">
           <div class="empty-state">
@@ -522,32 +511,32 @@
   <div class="panel" id="tab-export">
     <div class="export-panel">
       <h2>Export Captures for Claude</h2>
-      <p>Select captures in the Traffic tab (checkboxes), choose an export mode, then copy the output into Claude for analysis.</p>
+      <p>Select captures in the Traffic tab, choose an export mode, and review the output locally. Redact credentials before sharing it with an agent.</p>
       <div style="background:rgba(56,139,253,.08);border:1px solid rgba(56,139,253,.25);border-radius:var(--radius);padding:12px 16px;font-size:12px;color:var(--text2);line-height:1.7">
         <strong style="color:var(--accent)">Tip — let Claude do it directly.</strong>
-        In any Claude Code session, type <strong><code style="background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--get)">/intercept</code></strong> and ask Claude to analyze your traffic. It can run the export, read the output, and give you a full analysis — no copy/paste needed. For example: <em>"analyze the last 50 requests and document any undiscovered API endpoints"</em> or <em>"extract all auth tokens from today's captures."</em>
+        In any Claude Code session, type <strong><code style="background:var(--surface2);border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--get)">/intercept</code></strong> and ask for a traffic summary or API analysis. Keep authentication and full-detail exports local because they can contain live credentials.
       </div>
       <div class="export-options">
-        <div class="export-option selected" data-mode="api-docs" onclick="selectExportMode(this)">
+        <div class="export-option" data-mode="api-docs">
           <h3>API Documentation</h3>
           <p>Documents discovered endpoints, parameters, and schemas.</p>
         </div>
-        <div class="export-option" data-mode="auth" onclick="selectExportMode(this)">
+        <div class="export-option" data-mode="auth">
           <h3>Auth Extraction</h3>
           <p>Extracts cookies, tokens, Authorization headers, and session data.</p>
         </div>
-        <div class="export-option" data-mode="summary" onclick="selectExportMode(this)">
+        <div class="export-option selected" data-mode="summary">
           <h3>Traffic Summary</h3>
           <p>High-level overview of all captured requests and patterns.</p>
         </div>
-        <div class="export-option" data-mode="full" onclick="selectExportMode(this)">
+        <div class="export-option" data-mode="full">
           <h3>Full Detail</h3>
           <p>Complete headers and bodies for deep analysis.</p>
         </div>
       </div>
       <div style="display:flex;gap:8px;align-items:center">
-        <button class="btn primary" onclick="generateExport()">Generate Export</button>
-        <button class="btn" onclick="copyExport()">Copy to Clipboard</button>
+        <button class="btn primary" id="btn-generate-export">Generate Export</button>
+        <button class="btn" id="btn-copy-export">Copy to Clipboard</button>
         <span id="export-info" style="color:var(--text3);font-size:12px"></span>
       </div>
       <pre class="export-output" id="export-output">Click "Generate Export" to build output…</pre>
@@ -579,22 +568,22 @@
           <div id="local-proxy-status" style="font-size:12px;color:var(--text2)">Checking…</div>
         </div>
         <span id="linux-trust-wrap" style="display:none">
-          <button class="btn" id="btn-trust-ca" onclick="installTrustCA()">Install &amp; Trust CA</button>
+          <button class="btn" id="btn-trust-ca">Install &amp; Trust CA</button>
         </span>
-        <button class="btn primary" id="btn-proxy-on"  onclick="setLocalProxy(true)"  style="display:none">Enable for This Mac</button>
-        <button class="btn danger"  id="btn-proxy-off" onclick="setLocalProxy(false)" style="display:none">Disable</button>
+        <button class="btn primary" id="btn-proxy-on" style="display:none">Enable for This Mac</button>
+        <button class="btn danger" id="btn-proxy-off" style="display:none">Disable</button>
       </div>
       <div id="linux-trust-result" style="margin:0 0 14px 0"></div>
 
       <!-- Platform tabs -->
       <div class="setup-tabs">
-        <button class="platform-btn active" data-platform="this-mac" onclick="showPlatform('this-mac', this)">This Mac</button>
-        <button class="platform-btn" data-platform="ios" onclick="showPlatform('ios', this)">iOS / iPadOS</button>
-        <button class="platform-btn" data-platform="android" onclick="showPlatform('android', this)">Android</button>
-        <button class="platform-btn" data-platform="macos" onclick="showPlatform('macos', this)">macOS (manual)</button>
-        <button class="platform-btn" data-platform="windows" onclick="showPlatform('windows', this)">Windows</button>
-        <button class="platform-btn" data-platform="linux" onclick="showPlatform('linux', this)">Linux</button>
-        <button class="platform-btn" data-platform="firefox" onclick="showPlatform('firefox', this)">Firefox</button>
+        <button class="platform-btn active" data-platform="this-mac">This Mac</button>
+        <button class="platform-btn" data-platform="ios">iOS / iPadOS</button>
+        <button class="platform-btn" data-platform="android">Android</button>
+        <button class="platform-btn" data-platform="macos">macOS (manual)</button>
+        <button class="platform-btn" data-platform="windows">Windows</button>
+        <button class="platform-btn" data-platform="linux">Linux</button>
+        <button class="platform-btn" data-platform="firefox">Firefox</button>
       </div>
 
       <div class="setup-instructions" id="setup-instructions">
@@ -631,7 +620,7 @@
             <div class="feature-dot green">🔑</div>
             <div class="feature-text">
               <div class="ftitle">Extract auth & tokens</div>
-              <div class="fdesc">Automatically surface API keys, Bearer tokens, cookies, and JWTs from captured traffic.</div>
+              <div class="fdesc">Inspect API keys, Bearer tokens, cookies, and JWTs locally without sharing their values.</div>
             </div>
           </div>
           <div class="feature-item">
@@ -673,7 +662,7 @@
             <div class="card-desc">Run this command in Terminal (you'll be prompted for your password):</div>
             <pre id="cert-cmd">sudo security add-trusted-cert -d -r trustRoot \
   -k /Library/Keychains/System.keychain \
-  ~/Downloads/claude-intercept-ca.crt<button class="copy-btn" onclick="copyCode('cert-cmd', this)">Copy</button></pre>
+  ~/Downloads/claude-intercept-ca.crt<button class="copy-btn" data-copy-code="cert-cmd">Copy</button></pre>
           </div>
         </div>
         <div class="modal-notice">
@@ -705,7 +694,7 @@
           <div class="card-body">
             <div class="card-title">Terminal / CLI tools</div>
             <div class="card-desc">Most CLI tools respect env vars. Prefix any command or set for the session:</div>
-            <pre id="env-cmd">https_proxy=http://127.0.0.1:8080 curl -s https://api.example.com<button class="copy-btn" onclick="copyCode('env-cmd', this)">Copy</button></pre>
+            <pre id="env-cmd">https_proxy=http://127.0.0.1:8080 curl -s https://api.example.com<button class="copy-btn" data-copy-code="env-cmd">Copy</button></pre>
           </div>
         </div>
       </div>
@@ -726,7 +715,7 @@
           <div class="card-num">2</div>
           <div class="card-body">
             <div class="card-title">Select captures and export to Claude</div>
-            <div class="card-desc">Check the boxes next to interesting requests, go to <strong>Export for Claude</strong>, choose a mode (API docs, auth extraction, full detail), and copy the output straight into Claude.</div>
+            <div class="card-desc">Check the boxes next to interesting requests, choose an export mode, and review the output locally. Redact credentials before sharing an analysis.</div>
           </div>
         </div>
         <div class="step-card">
@@ -751,9 +740,9 @@
         <div class="modal-dot" id="dot-3"></div>
       </div>
       <div class="modal-actions">
-        <button class="btn-lg ghost" id="modal-back-btn" onclick="modalBack()" style="display:none">Back</button>
-        <button class="btn-lg ghost" id="modal-skip-btn" onclick="dismissWelcome()">Skip</button>
-        <button class="btn-lg primary" id="modal-next-btn" onclick="modalNext()">Get Started →</button>
+        <button class="btn-lg ghost" id="modal-back-btn" style="display:none">Back</button>
+        <button class="btn-lg ghost" id="modal-skip-btn">Skip</button>
+        <button class="btn-lg primary" id="modal-next-btn">Get Started →</button>
       </div>
     </div>
 
@@ -765,21 +754,23 @@
 let captures = [];
 let selectedId = null;
 let selectedCaptures = new Set();
-let exportMode = 'api-docs';
+let exportMode = 'summary';
+let generatedExportMode = null;
 let ws = null;
 let inspectorTab = 'req-headers';
 let inspectorCapture = null;
-// WebSocket frame inspector state
-let wsFrames = [];            // frames for the currently-inspected WS connection
-let wsFramesConnId = null;    // which connection wsFrames belongs to
-let wsOpcodeFilter = '';      // '' = all, otherwise opcode name
-let wsFrameSearch = '';
 let PROXY_PORT = 7777;
 let LAN_IP = null;
 let TAILSCALE_IP = null;
 let PLATFORM = null;
 let DE = null;
 let capturePaused = false;
+let wsFrames = [];
+let wsFrameOffset = 0;
+let wsFrameTotal = 0;
+let wsFramesConnId = null;
+let wsFrameRequest = 0;
+let wsRefreshTimer = null;
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
@@ -799,20 +790,30 @@ function connectWS() {
     const msg = JSON.parse(e.data);
     if (msg.type === 'capture') {
       addCapture(msg.data);
+    } else if (msg.type === 'wsFrame') {
+      if (msg.data.connectionId === wsFramesConnId && inspectorTab === 'ws-frames') {
+        clearTimeout(wsRefreshTimer);
+        wsRefreshTimer = setTimeout(() => loadWsFrames(wsFramesConnId, null), 250);
+      }
+    } else if (msg.type === 'wsClosed') {
+      const c = captures.find(row => row.id === msg.data.id);
+      if (c) Object.assign(c, msg.data);
+      if (inspectorCapture?.id === msg.data.id) {
+        Object.assign(inspectorCapture, msg.data);
+        renderInspector(inspectorCapture);
+        if (inspectorTab === 'ws-frames') loadWsFrames(msg.data.id, null);
+      }
     } else if (msg.type === 'stats') {
       updateStats(msg.data);
     } else if (msg.type === 'cleared') {
       captures = []; selectedId = null; selectedCaptures.clear(); inspectorCapture = null;
+      wsFrames = []; wsFramesConnId = null; wsFrameRequest++;
       renderList(); showInspectorEmpty(); updateSelCount(); applyFilters();
     } else if (msg.type === 'deleted') {
       const ids = new Set(msg.data.ids);
       captures = captures.filter(c => !ids.has(c.id));
       ids.forEach(id => selectedCaptures.delete(id));
       renderList(); updateSelCount(); applyFilters();
-    } else if (msg.type === 'wsFrame') {
-      onWsFrame(msg.data);
-    } else if (msg.type === 'wsClosed') {
-      onWsClosed(msg.data);
     } else if (msg.type === 'capturePaused') {
       capturePaused = true; updatePauseBtn();
     } else if (msg.type === 'captureResumed') {
@@ -990,13 +991,19 @@ async function installTrustCA() {
 function renderIPBar(data) {
   const bar = document.getElementById('ip-info-bar');
   let html = '';
-  if (data.lanIp && data.lanIp !== '127.0.0.1') {
+  if (!data.ui?.lanEnabled) {
+    html += `<div class="ip-chip">
+      <span class="label">Access</span>
+      <span class="value">This machine only</span>
+    </div>`;
+  }
+  if (data.ui?.lanEnabled && data.lanIp && data.lanIp !== '127.0.0.1') {
     html += `<div class="ip-chip">
       <span class="label">Wi-Fi / LAN</span>
       <span class="value">${escHtml(data.lanIp)}</span>
     </div>`;
   }
-  if (data.tailscaleIp) {
+  if (data.ui?.lanEnabled && data.tailscaleIp) {
     html += `<div class="ip-chip tailscale">
       <span class="label">Tailscale</span>
       <span class="value">${escHtml(data.tailscaleIp)}</span>
@@ -1056,9 +1063,17 @@ function deviceBadge(label) {
   return `<span class="device-badge${cls}">${escHtml(label)}</span>`;
 }
 
+function methodBadgeClass(method) {
+  return ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD', 'WS'].includes(method)
+    ? method : 'OTHER';
+}
+
 function rowHTML(c) {
-  const method = c.method || 'GET';
-  const status = c.responseStatus || 0;
+  const id = Number(c.id);
+  if (!Number.isSafeInteger(id) || id < 1) return '';
+  const method = String(c.method || 'GET');
+  const methodClass = methodBadgeClass(method);
+  const status = Number(c.responseStatus) || 0;
   const statusClass = status >= 500 ? 's-5xx' : status >= 400 ? 's-4xx' : status >= 300 ? 's-3xx' : status >= 200 ? 's-2xx' : 's-0';
   const sel = selectedId === c.id ? ' selected' : '';
   const checked = selectedCaptures.has(c.id) ? ' checked' : '';
@@ -1066,9 +1081,9 @@ function rowHTML(c) {
   let pathStr = c.path || '/';
   if (pathStr.length > 60) pathStr = pathStr.slice(0, 60) + '…';
   const ts = c.timestamp ? new Date(c.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
-  return `<div class="capture-row${sel}" data-id="${c.id}" onclick="selectCapture(${c.id}, event)">
-    <input type="checkbox" class="capture-checkbox" ${checked} onclick="toggleSelect(${c.id}, event)">
-    <span class="method-badge method-${method}">${method}</span>
+  return `<div class="capture-row${sel}" data-id="${id}">
+    <input type="checkbox" class="capture-checkbox" ${checked}>
+    <span class="method-badge method-${methodClass}">${escHtml(method)}</span>
     <span class="status-badge ${statusClass}">${status || '—'}</span>
     <span class="capture-url"><span class="host">${escHtml(c.host)}</span>${escHtml(pathStr)}</span>
     ${deviceBadge(c.clientLabel)}
@@ -1143,21 +1158,8 @@ async function selectCapture(id, e) {
     // Update local captures cache with full data
     const idx = captures.findIndex(x => x.id === id);
     if (idx !== -1) captures[idx] = { ...captures[idx], ...c };
-    // WebSocket connections default to the Frames tab; reset the cache.
-    if (isWsCapture(c)) {
-      if (inspectorTab !== 'ws-frames') inspectorTab = 'ws-frames';
-      wsFrames = [];
-      wsFramesConnId = id;
-      loadWsFrames(id);
-    } else if (inspectorTab === 'ws-frames') {
-      inspectorTab = 'req-headers';
-    }
     renderInspector(c);
   }
-}
-
-function isWsCapture(c) {
-  return c && (c.method === 'WS' || c.contentType === 'websocket');
 }
 
 function toggleSelect(id, e) {
@@ -1252,6 +1254,8 @@ async function fetchCapture(id) {
 
 // ── Inspector ─────────────────────────────────────────────────────────────────
 function showInspectorEmpty() {
+  wsFramesConnId = null;
+  wsFrameRequest++;
   document.getElementById('inspector').innerHTML = `<div class="inspector-empty">
     <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
       <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -1261,7 +1265,13 @@ function showInspectorEmpty() {
 }
 
 function renderInspector(c) {
-  const status = c.responseStatus || 0;
+  if (c.method === 'WS' && inspectorTab !== 'ws-frames' && inspectorTab !== 'req-headers') {
+    inspectorTab = 'ws-frames';
+  }
+  if (c.method !== 'WS' && inspectorTab === 'ws-frames') inspectorTab = 'req-headers';
+  const status = Number(c.responseStatus) || 0;
+  const method = String(c.method || 'GET');
+  const methodClass = methodBadgeClass(method);
   const statusClass = status >= 500 ? 's-5xx' : status >= 400 ? 's-4xx' : status >= 300 ? 's-3xx' : status >= 200 ? 's-2xx' : 's-0';
   const reqHeaders = c.requestHeaders || {};
   const authTags = [];
@@ -1273,7 +1283,7 @@ function renderInspector(c) {
   document.getElementById('inspector').innerHTML = `
     <div class="inspector-header">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-        <span class="method-badge method-${c.method}">${c.method}</span>
+        <span class="method-badge method-${methodClass}">${escHtml(method)}</span>
         <span class="status-badge ${statusClass}">${status || '—'}</span>
         ${authTags.join('')}
       </div>
@@ -1286,15 +1296,14 @@ function renderInspector(c) {
       </div>
     </div>
     <div class="inspector-tabs">
-      ${isWsCapture(c)
-        ? `<button class="${inspectorTab==='ws-frames'?'active':''}" onclick="switchInspTab('ws-frames',this)">Frames</button>
-           <button class="${inspectorTab==='req-headers'?'active':''}" onclick="switchInspTab('req-headers',this)">Upgrade Headers</button>`
-        : `<button class="${inspectorTab==='req-headers'?'active':''}" onclick="switchInspTab('req-headers',this)">Req Headers</button>
-           <button class="${inspectorTab==='req-body'?'active':''}" onclick="switchInspTab('req-body',this)">Req Body</button>
-           <button class="${inspectorTab==='res-headers'?'active':''}" onclick="switchInspTab('res-headers',this)">Res Headers</button>
-           <button class="${inspectorTab==='res-body'?'active':''}" onclick="switchInspTab('res-body',this)">Res Body</button>`}
+      ${c.method === 'WS' ? `<button class="${inspectorTab==='ws-frames'?'active':''}" data-inspector-tab="ws-frames">Frames</button>` : ''}
+      <button class="${inspectorTab==='req-headers'?'active':''}" data-inspector-tab="req-headers">Req Headers</button>
+      ${c.method === 'WS' ? '' : `<button class="${inspectorTab==='req-body'?'active':''}" data-inspector-tab="req-body">Req Body</button>
+      <button class="${inspectorTab==='res-headers'?'active':''}" data-inspector-tab="res-headers">Res Headers</button>
+      <button class="${inspectorTab==='res-body'?'active':''}" data-inspector-tab="res-body">Res Body</button>`}
     </div>
     <div class="inspector-body" id="insp-body">${renderInspBody(c, inspectorTab)}</div>`;
+  if (c.method === 'WS' && inspectorTab === 'ws-frames') loadWsFrames(c.id, null);
 }
 
 function switchInspTab(tab, btn) {
@@ -1303,10 +1312,11 @@ function switchInspTab(tab, btn) {
   btn.classList.add('active');
   if (!inspectorCapture) return;
   document.getElementById('insp-body').innerHTML = renderInspBody(inspectorCapture, tab);
+  if (tab === 'ws-frames') loadWsFrames(inspectorCapture.id, null);
 }
 
 function renderInspBody(c, tab) {
-  if (tab === 'ws-frames')   return renderWsFrames(c);
+  if (tab === 'ws-frames') return '<span style="color:var(--text3)">Loading frames…</span>';
   if (tab === 'req-headers') return headersTable(c.requestHeaders || {});
   if (tab === 'res-headers') return headersTable(c.responseHeaders || {});
   if (tab === 'req-body')    return bodyContent(c.requestBody, '', c.requestEncoding, c.requestBodySize);
@@ -1314,107 +1324,43 @@ function renderInspBody(c, tab) {
   return '';
 }
 
-// ── WebSocket frame inspector ───────────────────────────────────────────────
-const WS_OPCODE_NAMES = { 0:'continuation', 1:'text', 2:'binary', 8:'close', 9:'ping', 10:'pong' };
-
-async function loadWsFrames(id) {
+const WS_OPCODES = { 1: 'text', 2: 'binary', 8: 'close' };
+async function loadWsFrames(id, offset = null) {
+  if (!Number.isSafeInteger(id) || id < 1) return;
+  const request = ++wsFrameRequest;
+  wsFramesConnId = id;
+  const query = offset === null ? 'limit=50&tail=true' : `limit=50&offset=${offset}`;
   try {
-    const r = await fetch(`/api/captures/${id}/frames`);
-    const data = await r.json();
-    // Guard against a slower request landing after the user moved on.
-    if (wsFramesConnId !== id) return;
-    wsFrames = data.frames || [];
-    if (inspectorCapture && inspectorCapture.id === id && inspectorTab === 'ws-frames') {
-      const body = document.getElementById('insp-body');
-      if (body) body.innerHTML = renderWsFrames(inspectorCapture);
-    }
-  } catch {}
-}
-
-function onWsFrame(frame) {
-  // Live-append a frame if its connection is the one currently open.
-  if (wsFramesConnId !== frame.connectionId) return;
-  wsFrames.push(frame);
-  if (inspectorTab !== 'ws-frames') return;
-  const list = document.getElementById('ws-frame-list');
-  if (!list) {
-    const body = document.getElementById('insp-body');
-    if (body && inspectorCapture) body.innerHTML = renderWsFrames(inspectorCapture);
-    return;
-  }
-  if (wsFrameMatches(frame)) list.insertAdjacentHTML('beforeend', wsFrameHTML(frame));
-}
-
-function onWsClosed(data) {
-  // Update the connection row + inspector header with the final summary.
-  const idx = captures.findIndex(c => c.id === data.id);
-  if (idx !== -1) {
-    captures[idx] = { ...captures[idx], duration: data.duration, responseStatus: data.responseStatus, responseBody: data.responseBody };
-    renderList();
-  }
-  if (inspectorCapture && inspectorCapture.id === data.id) {
-    inspectorCapture = { ...inspectorCapture, duration: data.duration, responseStatus: data.responseStatus, responseBody: data.responseBody };
-    renderInspector(inspectorCapture);
+    const res = await fetch(`/api/captures/${id}/frames?${query}`);
+    if (!res.ok) throw new Error('Frame history unavailable');
+    const data = await res.json();
+    if (request !== wsFrameRequest || inspectorCapture?.id !== id || inspectorTab !== 'ws-frames') return;
+    wsFrames = data.frames.slice(0, 50);
+    wsFrameOffset = data.offset;
+    wsFrameTotal = data.total;
+    renderWsFrames();
+  } catch {
+    if (request === wsFrameRequest) document.getElementById('insp-body').textContent = 'Could not load frames.';
   }
 }
 
-function wsFrameMatches(f) {
-  if (wsOpcodeFilter && WS_OPCODE_NAMES[f.opcode] !== wsOpcodeFilter) return false;
-  if (wsFrameSearch && !String(f.payload || '').toLowerCase().includes(wsFrameSearch.toLowerCase())) return false;
-  return true;
-}
-
-function setWsOpcodeFilter(v) { wsOpcodeFilter = v; rerenderWsFrameList(); }
-function setWsFrameSearch(v) { wsFrameSearch = v; rerenderWsFrameList(); }
-
-function rerenderWsFrameList() {
-  const list = document.getElementById('ws-frame-list');
-  if (!list) return;
-  list.innerHTML = wsFrames.filter(wsFrameMatches).map(wsFrameHTML).join('') ||
-    '<div style="color:var(--text3);font-size:12px;padding:8px">No frames match</div>';
-}
-
-function renderWsFrames(c) {
-  const opcodes = [...new Set(wsFrames.map(f => WS_OPCODE_NAMES[f.opcode]).filter(Boolean))];
-  const bar = `<div class="ws-frame-bar">
-    <select onchange="setWsOpcodeFilter(this.value)">
-      <option value="">All opcodes</option>
-      ${opcodes.map(o => `<option value="${o}"${o===wsOpcodeFilter?' selected':''}>${o}</option>`).join('')}
-    </select>
-    <input type="text" placeholder="Search payloads…" value="${escHtml(wsFrameSearch)}"
-           oninput="setWsFrameSearch(this.value)" style="flex:1;min-width:120px">
-    <span style="color:var(--text3);font-size:11px">${wsFrames.length} frame${wsFrames.length===1?'':'s'}</span>
+function renderWsFrames() {
+  const start = wsFrames.length ? wsFrameOffset + 1 : 0;
+  const end = wsFrameOffset + wsFrames.length;
+  const controls = `<div class="ws-page">
+    <button data-ws-offset="${Math.max(0, wsFrameOffset - 50)}" ${wsFrameOffset === 0 ? 'disabled' : ''}>Previous</button>
+    <span>${start}–${end} of ${wsFrameTotal} frames</span>
+    <button data-ws-offset="${wsFrameOffset + 50}" ${end >= wsFrameTotal ? 'disabled' : ''}>Next</button>
+    <button data-ws-tail="1">Latest</button>
   </div>`;
-  if (!wsFrames.length) {
-    const note = (c && c.responseStatus && c.responseStatus !== 101)
-      ? `Upgrade did not complete (status ${c.responseStatus}).`
-      : 'No frames captured yet…';
-    return `${bar}<div style="color:var(--text3);font-size:12px;padding:8px">${note}</div>`;
-  }
-  const rows = wsFrames.filter(wsFrameMatches).map(wsFrameHTML).join('') ||
-    '<div style="color:var(--text3);font-size:12px;padding:8px">No frames match</div>';
-  return `${bar}<div class="ws-frames" id="ws-frame-list">${rows}</div>`;
-}
-
-function wsFrameHTML(f) {
-  const out = f.direction === 'client→server';
-  const op = WS_OPCODE_NAMES[f.opcode] || `0x${Number(f.opcode).toString(16)}`;
-  const ts = f.timestamp ? new Date(f.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
-  let payload = f.payload || '';
-  if (f.isText && (payload.trimStart().startsWith('{') || payload.trimStart().startsWith('['))) {
-    try { payload = JSON.stringify(JSON.parse(payload), null, 2); } catch {}
-  }
-  const kindNote = f.isText ? '' : (f.compressed ? ' · deflated (base64)' : ' · base64');
-  return `<div class="ws-frame dir-${out ? 'out' : 'in'}">
-    <div class="ws-frame-head">
-      <span class="ws-arrow ${out ? 'out' : 'in'}">${out ? '▲ ↑' : '▼ ↓'}</span>
-      <span class="ws-op">${op}</span>
-      <span>${formatBytes(f.payloadSize)}${kindNote}</span>
-      ${f.truncated ? '<span class="ws-trunc">truncated</span>' : ''}
-      <span style="margin-left:auto">${ts}</span>
-    </div>
-    <pre>${escHtml(payload)}</pre>
-  </div>`;
+  const rows = wsFrames.map(frame => {
+    const direction = frame.direction === 'client→server' ? 'Client → Server' : 'Server → Client';
+    const opcode = WS_OPCODES[frame.opcode] || 'control';
+    const tag = frame.isText ? '' : ' (base64/hex)';
+    return `<div class="ws-frame"><div class="ws-frame-meta">${direction} · ${opcode}${tag}${frame.truncated ? ' · truncated' : ''}</div>
+      <pre>${escHtml(frame.payload)}</pre></div>`;
+  }).join('') || '<div style="color:var(--text3)">No frames captured.</div>';
+  document.getElementById('insp-body').innerHTML = controls + rows;
 }
 
 function headersTable(headers) {
@@ -1459,10 +1405,12 @@ function selectExportMode(el) {
 
 async function generateExport() {
   const ids = [...selectedCaptures].join(',');
-  const url = ids ? `/api/analyze?ids=${ids}&mode=${exportMode}` : `/api/analyze?mode=${exportMode}&limit=100`;
+  const mode = exportMode;
+  const url = ids ? `/api/analyze?ids=${ids}&mode=${mode}` : `/api/analyze?mode=${mode}&limit=100`;
   try {
     const res = await fetch(url);
     const data = await res.json();
+    generatedExportMode = data.error ? null : mode;
     document.getElementById('export-output').textContent = data.error ? 'Error: ' + data.error : data.output;
     document.getElementById('export-info').textContent = data.count ? `${data.count} captures` : '';
   } catch (e) {
@@ -1473,6 +1421,8 @@ async function generateExport() {
 async function copyExport() {
   const text = document.getElementById('export-output').textContent;
   if (text && text !== 'Click "Generate Export" to build output…') {
+    if (generatedExportMode !== 'summary' &&
+        !confirm('This export may contain live credentials. Copy it to the clipboard?')) return;
     await navigator.clipboard.writeText(text);
     document.getElementById('export-info').textContent = 'Copied!';
     setTimeout(() => document.getElementById('export-info').textContent = '', 2000);
@@ -1490,24 +1440,32 @@ async function refreshLocalProxyStatus() {
     const res = await fetch('/api/proxy/status');
     const data = await res.json();
     const services = data.services || [];
-    const active   = services.find(s => s.pointsHere);
-    const anyOn    = services.some(s => s.httpEnabled || s.httpsEnabled);
+    const active   = data.ownership?.active && data.ownership.port === PROXY_PORT;
+    const anyOn    = services.some(s => s.activeProxy || s.httpEnabled || s.httpsEnabled);
+    const inspectable = services.length > 0 && services.every(s => s.inspectable !== false);
     const statusEl = document.getElementById('local-proxy-status');
     const btnOn    = document.getElementById('btn-proxy-on');
     const btnOff   = document.getElementById('btn-proxy-off');
 
-    if (active) {
-      statusEl.innerHTML = `<span style="color:var(--s2xx)">● Active</span> — routing through 127.0.0.1:${active.port} on ${active.service}`;
+    if (PLATFORM === 'win32') {
+      statusEl.textContent = 'Manual Windows proxy setup is required.';
+      btnOn.style.display = btnOff.style.display = 'none';
+    } else if (data.ownership?.unverified) {
+      statusEl.textContent = 'Cannot verify proxy ownership; inspect the local settings.';
+      btnOn.style.display = btnOff.style.display = 'none';
+    } else if (active) {
+      statusEl.innerHTML = `<span style="color:var(--s2xx)">● Active</span> — routing through 127.0.0.1:${PROXY_PORT}`;
       btnOn.style.display  = 'none';
       btnOff.style.display = '';
     } else if (anyOn) {
-      const other = services.find(s => s.httpEnabled);
-      statusEl.innerHTML = `<span style="color:var(--put)">● Proxy on</span> — but pointing to ${other?.server}:${other?.port}. Click enable to redirect.`;
-      btnOn.style.display = btnOff.style.display = '';
+      statusEl.textContent = 'Another system proxy is enabled; Intercept will leave it unchanged.';
+      btnOn.style.display = btnOff.style.display = 'none';
     } else if (!services.length && PLATFORM === 'linux' && !DE) {
       statusEl.innerHTML = `<span style="color:var(--text3)">○ Env only</span> — no GNOME/KDE detected; set the proxy env vars (see Linux tab)`;
-      btnOn.style.display  = '';
-      btnOff.style.display = 'none';
+      btnOn.style.display = btnOff.style.display = 'none';
+    } else if (!inspectable) {
+      statusEl.textContent = 'Unable to verify system proxy settings.';
+      btnOn.style.display = btnOff.style.display = 'none';
     } else {
       statusEl.innerHTML = `<span style="color:var(--text3)">○ Off</span> — direct connections`;
       btnOn.style.display  = '';
@@ -1523,7 +1481,11 @@ async function setLocalProxy(enable) {
   const btnOff = document.getElementById('btn-proxy-off');
   btnOn.disabled = btnOff.disabled = true;
   try {
-    await fetch(enable ? '/api/proxy/on' : '/api/proxy/off', { method: 'POST' });
+    const res = await fetch(enable ? '/api/proxy/on' : '/api/proxy/off', { method: 'POST' });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(data.error || 'System proxy change was refused');
+    }
     await refreshLocalProxyStatus();
   } catch (e) {
     document.getElementById('local-proxy-status').textContent = 'Failed: ' + e.message;
@@ -1634,11 +1596,67 @@ function showTab(name, btn) {
   }
 }
 
+function bindEvents() {
+  const on = (id, event, handler) => document.getElementById(id).addEventListener(event, handler);
+  on('btn-pause', 'click', togglePause);
+  on('btn-select-all', 'click', selectAll);
+  on('btn-sel-filtered', 'click', selectFiltered);
+  on('btn-deselect', 'click', clearSelection);
+  on('btn-export-sel', 'click', exportSelected);
+  on('btn-delete-sel', 'click', deleteSelected);
+  on('btn-clear-captures', 'click', clearCaptures);
+  on('btn-generate-export', 'click', generateExport);
+  on('btn-copy-export', 'click', copyExport);
+  on('btn-trust-ca', 'click', installTrustCA);
+  on('btn-proxy-on', 'click', () => setLocalProxy(true));
+  on('btn-proxy-off', 'click', () => setLocalProxy(false));
+  on('modal-back-btn', 'click', modalBack);
+  on('modal-skip-btn', 'click', dismissWelcome);
+  on('modal-next-btn', 'click', modalNext);
+
+  for (const id of ['f-search', 'f-host']) on(id, 'input', applyFilters);
+  for (const id of ['f-method', 'f-status', 'f-device']) on(id, 'change', applyFilters);
+
+  on('main-nav', 'click', e => {
+    const btn = e.target.closest('button[data-tab]');
+    if (btn) showTab(btn.dataset.tab, btn);
+  });
+  on('traffic-list', 'click', e => {
+    const row = e.target.closest('.capture-row');
+    if (!row) return;
+    const id = Number(row.dataset.id);
+    if (e.target.matches('.capture-checkbox')) toggleSelect(id, e);
+    else selectCapture(id, e);
+  });
+  on('inspector', 'click', e => {
+    const page = e.target.closest('button[data-ws-offset],button[data-ws-tail]');
+    if (page && inspectorCapture?.method === 'WS') {
+      loadWsFrames(inspectorCapture.id, page.dataset.wsTail ? null : Number(page.dataset.wsOffset));
+      return;
+    }
+    const btn = e.target.closest('button[data-inspector-tab]');
+    if (btn) switchInspTab(btn.dataset.inspectorTab, btn);
+  });
+  document.querySelector('.export-options').addEventListener('click', e => {
+    const option = e.target.closest('.export-option');
+    if (option) selectExportMode(option);
+  });
+  document.querySelector('.setup-tabs').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-platform]');
+    if (btn) showPlatform(btn.dataset.platform, btn);
+  });
+  document.getElementById('welcome-backdrop').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-copy-code]');
+    if (btn) copyCode(btn.dataset.copyCode, btn);
+  });
+}
+
 // ── Util ──────────────────────────────────────────────────────────────────────
 function escHtml(str) {
   return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+bindEvents();
 init();
 </script>
 </body>

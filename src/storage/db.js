@@ -7,11 +7,39 @@ const fs = require('fs');
 
 const DB_DIR = path.join(__dirname, '../../captures');
 const DB_PATH = path.join(DB_DIR, 'captures.db');
+const MAX_QUERY_LIMIT = 5000;
+const MAX_WS_QUERY_LIMIT = 100;
+const MAX_WS_FRAMES_PER_CONNECTION = 200;
+const MAX_WS_PAYLOAD_BYTES = 8192;
 
 let db;
 
+function secureFile(filePath) {
+  try {
+    if (!fs.lstatSync(filePath).isFile()) {
+      throw new Error(`Capture database path is not a regular file: ${filePath}`);
+    }
+    fs.chmodSync(filePath, 0o600);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+}
+
 function init() {
-  if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+  fs.mkdirSync(DB_DIR, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(DB_DIR).isDirectory()) {
+    throw new Error(`Capture path is not a directory: ${DB_DIR}`);
+  }
+  fs.chmodSync(DB_DIR, 0o700);
+  for (const filePath of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`, `${DB_PATH}-journal`]) {
+    secureFile(filePath);
+  }
+
+  // SQLite does not expose a file-mode option. Pre-create the database with
+  // owner-only access before SQLite opens it.
+  const fd = fs.openSync(DB_PATH, 'a', 0o600);
+  fs.closeSync(fd);
+  secureFile(DB_PATH);
 
   db = new DatabaseSync(DB_PATH);
   db.exec('PRAGMA journal_mode = WAL');
@@ -36,30 +64,23 @@ function init() {
     CREATE INDEX IF NOT EXISTS idx_method    ON captures(method);
     CREATE INDEX IF NOT EXISTS idx_status    ON captures(response_status);
     CREATE INDEX IF NOT EXISTS idx_timestamp ON captures(timestamp);
-  `);
-
-  // WebSocket frames: one row per application/control frame, linked back to the
-  // connection-level row in `captures` (method 'WS') via connection_id. This
-  // keeps the dashboard's "one row per request" model intact — the connection
-  // is the request, frames expand inline underneath it.
-  db.exec(`
     CREATE TABLE IF NOT EXISTS ws_frames (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       connection_id INTEGER NOT NULL,
       timestamp     INTEGER NOT NULL,
-      direction     TEXT    NOT NULL,   -- 'client→server' | 'server→client'
-      opcode        INTEGER NOT NULL,   -- RFC 6455 opcode
-      is_text       INTEGER NOT NULL,   -- 1 = utf-8 text, 0 = base64/hex
-      payload       TEXT,
-      payload_size  INTEGER,            -- decoded byte length on the wire
-      truncated     INTEGER DEFAULT 0,
-      compressed    INTEGER DEFAULT 0   -- 1 = deflated bytes we couldn't inflate
+      direction     TEXT    NOT NULL,
+      opcode        INTEGER NOT NULL,
+      is_text       INTEGER NOT NULL,
+      payload       TEXT    NOT NULL,
+      payload_size  INTEGER NOT NULL,
+      truncated     INTEGER NOT NULL DEFAULT 0,
+      compressed    INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_ws_conn ON ws_frames(connection_id);
   `);
 
-  // Migration: add compressed column to ws_frames on pre-existing DBs.
-  try { db.exec("ALTER TABLE ws_frames ADD COLUMN compressed INTEGER DEFAULT 0"); } catch {}
+  // Earlier preview builds may have created ws_frames before compression was tracked.
+  try { db.exec('ALTER TABLE ws_frames ADD COLUMN compressed INTEGER NOT NULL DEFAULT 0'); } catch {}
 
   // Migration: add device columns (safe to run on existing DBs — errors = column already exists)
   try { db.exec("ALTER TABLE captures ADD COLUMN client_ip TEXT"); } catch {}
@@ -70,6 +91,12 @@ function init() {
   try { db.exec("ALTER TABLE captures ADD COLUMN response_body_size INTEGER DEFAULT 0"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN request_encoding TEXT DEFAULT 'identity'"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN request_body_size INTEGER DEFAULT 0"); } catch {}
+
+  // WAL/SHM files may be created by the first schema write, after the database
+  // connection opens. Match the database's owner-only permissions.
+  for (const filePath of [`${DB_PATH}-wal`, `${DB_PATH}-shm`, `${DB_PATH}-journal`]) {
+    secureFile(filePath);
+  }
 
   return db;
 }
@@ -124,6 +151,12 @@ function queryCaptures({
   limit = 100,
   offset = 0,
 } = {}) {
+  const requestedLimit = Number(limit);
+  const requestedOffset = Number(offset);
+  const boundedLimit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+    ? Math.min(requestedLimit, MAX_QUERY_LIMIT) : 100;
+  const boundedOffset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+    ? requestedOffset : 0;
   const conditions = [];
   const params = {};
 
@@ -180,7 +213,7 @@ function queryCaptures({
     .prepare(
       `SELECT * FROM captures ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`
     )
-    .all({ ...params, $limit: limit, $offset: offset });
+    .all({ ...params, $limit: boundedLimit, $offset: boundedOffset });
 
   return {
     total: Number(total),
@@ -194,71 +227,81 @@ function getCaptureById(id) {
 }
 
 function clearCaptures() {
-  db.prepare('DELETE FROM captures').run();
-  db.prepare('DELETE FROM ws_frames').run();
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM ws_frames').run();
+    db.prepare('DELETE FROM captures').run();
+    db.exec('COMMIT');
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
 function deleteCaptures(ids) {
+  if (!Array.isArray(ids)) throw new TypeError('ids must be an array');
+  if (ids.length === 0) return 0;
   const placeholders = ids.map(() => '?').join(',');
-  db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids);
-  db.prepare(`DELETE FROM ws_frames WHERE connection_id IN (${placeholders})`).run(...ids);
+  db.exec('BEGIN');
+  try {
+    db.prepare(`DELETE FROM ws_frames WHERE connection_id IN (${placeholders})`).run(...ids);
+    const deleted = db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids).changes;
+    db.exec('COMMIT');
+    return deleted;
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  }
 }
 
-// ── WebSocket frames ───────────────────────────────────────────────────────
-
 function insertWsFrame(frame) {
-  const stmt = db.prepare(`
+  if (!Number.isSafeInteger(frame.connectionId) || frame.connectionId < 1 ||
+      typeof frame.payload !== 'string' ||
+      Buffer.byteLength(frame.payload) > MAX_WS_PAYLOAD_BYTES) {
+    throw new RangeError('Invalid or oversized WebSocket frame capture');
+  }
+  if (getWsFrameCount(frame.connectionId) >= MAX_WS_FRAMES_PER_CONNECTION) return null;
+  const result = db.prepare(`
     INSERT INTO ws_frames
       (connection_id, timestamp, direction, opcode, is_text, payload, payload_size, truncated, compressed)
     VALUES
       ($connectionId, $timestamp, $direction, $opcode, $isText, $payload, $payloadSize, $truncated, $compressed)
-  `);
-  const result = stmt.run({
+  `).run({
     $connectionId: frame.connectionId,
     $timestamp: frame.timestamp,
     $direction: frame.direction,
     $opcode: frame.opcode,
     $isText: frame.isText ? 1 : 0,
-    $payload: frame.payload || '',
-    $payloadSize: frame.payloadSize || 0,
+    $payload: frame.payload,
+    $payloadSize: frame.payloadSize,
     $truncated: frame.truncated ? 1 : 0,
     $compressed: frame.compressed ? 1 : 0,
   });
   return Number(result.lastInsertRowid);
 }
 
-function getWsFrames(connectionId, { limit = 5000, offset = 0 } = {}) {
-  return db
-    .prepare(
-      `SELECT * FROM ws_frames WHERE connection_id = $id
-       ORDER BY id ASC LIMIT $limit OFFSET $offset`
-    )
-    .all({ $id: connectionId, $limit: limit, $offset: offset })
+function getWsFrames(connectionId, { limit = MAX_WS_QUERY_LIMIT, offset = 0 } = {}) {
+  const count = Number(limit);
+  const start = Number(offset);
+  const boundedLimit = Number.isSafeInteger(count) && count > 0
+    ? Math.min(count, MAX_WS_QUERY_LIMIT) : MAX_WS_QUERY_LIMIT;
+  const boundedOffset = Number.isSafeInteger(start) && start >= 0 ? start : 0;
+  return db.prepare(`SELECT * FROM ws_frames WHERE connection_id = $id
+    ORDER BY id ASC LIMIT $limit OFFSET $offset`)
+    .all({ $id: connectionId, $limit: boundedLimit, $offset: boundedOffset })
     .map(parseFrameRow);
 }
 
 function getWsFrameCount(connectionId) {
-  const row = db
-    .prepare('SELECT COUNT(*) as n FROM ws_frames WHERE connection_id = $id')
-    .get({ $id: connectionId });
-  return Number(row?.n || 0);
+  return Number(db.prepare('SELECT COUNT(*) AS n FROM ws_frames WHERE connection_id = $id')
+    .get({ $id: connectionId })?.n || 0);
 }
 
-// Update the connection-level row once the WS closes — final duration plus a
-// human summary in place of the "[capturing frames…]" placeholder.
 function finalizeWsCapture(id, { duration, responseBody, responseStatus }) {
-  db.prepare(
-    `UPDATE captures
-       SET duration_ms = $duration,
-           response_body = $responseBody,
-           response_status = $responseStatus
-     WHERE id = $id`
-  ).run({
-    $id: id,
-    $duration: duration || 0,
-    $responseBody: responseBody || '',
-    $responseStatus: responseStatus || 101,
-  });
+  return db.prepare(`UPDATE captures SET duration_ms = $duration,
+    response_body = $responseBody, response_status = $responseStatus WHERE id = $id`)
+    .run({ $id: id, $duration: duration || 0, $responseBody: responseBody || '',
+      $responseStatus: responseStatus || 101 }).changes;
 }
 
 function getStats() {
@@ -309,11 +352,11 @@ function parseFrameRow(row) {
     timestamp: Number(row.timestamp),
     direction: row.direction,
     opcode: Number(row.opcode),
-    isText: !!row.is_text,
+    isText: Boolean(row.is_text),
     payload: row.payload,
     payloadSize: Number(row.payload_size || 0),
-    truncated: !!row.truncated,
-    compressed: !!row.compressed,
+    truncated: Boolean(row.truncated),
+    compressed: Boolean(row.compressed),
   };
 }
 
@@ -328,8 +371,6 @@ function tryParse(str, fallback) {
   try { return JSON.parse(str); } catch { return fallback; }
 }
 
-module.exports = {
-  init, insertCapture, queryCaptures, getCaptureById, clearCaptures, deleteCaptures,
-  getStats, getDevices,
-  insertWsFrame, getWsFrames, getWsFrameCount, finalizeWsCapture,
-};
+module.exports = { init, insertCapture, queryCaptures, getCaptureById, clearCaptures,
+  deleteCaptures, getStats, getDevices, insertWsFrame, getWsFrames, getWsFrameCount,
+  finalizeWsCapture };

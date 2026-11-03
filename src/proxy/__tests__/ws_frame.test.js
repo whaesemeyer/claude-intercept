@@ -108,10 +108,26 @@ test('16-bit (126) length frame', () => {
 });
 
 test('64-bit (127) length frame', () => {
-  const p = new WsFrameParser();
+  const p = new WsFrameParser({ maxMessageBytes: 128 * 1024 });
   const big = 'b'.repeat(70000);
   const msgs = p.push(buildFrame(OPCODES.TEXT, big));
   assert.strictEqual(msgs[0].payload.toString('utf8'), big);
+});
+
+test('oversized frames stop capture without parsing their payload as new frames', () => {
+  const p = new WsFrameParser({ maxMessageBytes: 16 });
+  const large = buildFrame(OPCODES.TEXT, 'x'.repeat(100));
+  assert.deepStrictEqual(p.push(large.subarray(0, 4)), []);
+  assert.equal(p.stopped, true);
+  assert.deepStrictEqual(p.push(large.subarray(4)), []);
+  assert.deepStrictEqual(p.push(buildFrame(OPCODES.TEXT, 'later')), []);
+});
+
+test('wire observation budget stops capture while other socket work can continue', () => {
+  const p = new WsFrameParser({ maxMessageBytes: 64, maxObservedBytes: 12 });
+  assert.equal(p.push(buildFrame(OPCODES.TEXT, 'first'))[0].payload.toString(), 'first');
+  assert.deepStrictEqual(p.push(buildFrame(OPCODES.TEXT, 'second')), []);
+  assert.equal(p.stopped, true);
 });
 
 test('frame split across multiple push calls', () => {
@@ -140,7 +156,8 @@ test('two frames in a single chunk', () => {
 
 test('message byte cap truncates and flags', () => {
   const p = new WsFrameParser({ maxMessageBytes: 10 });
-  const msgs = p.push(buildFrame(OPCODES.TEXT, 'this is longer than ten bytes'));
+  p.push(buildFrame(OPCODES.TEXT, 'abcdef', { fin: false }));
+  const msgs = p.push(buildFrame(OPCODES.CONTINUATION, 'ghijkl'));
   assert.strictEqual(msgs[0].truncated, true);
   assert.strictEqual(msgs[0].payload.length, 10);
 });
@@ -158,6 +175,16 @@ test('permessage-deflate message is inflated', () => {
   assert.strictEqual(msgs.length, 1);
   assert.strictEqual(msgs[0].compressed, false);
   assert.strictEqual(msgs[0].payload.toString('utf8'), text);
+});
+
+test('compressed payloads cannot inflate beyond the capture limit', () => {
+  const body = zlib.deflateRawSync(Buffer.from('x'.repeat(5000)));
+  const p = new WsFrameParser({ maxMessageBytes: 100, permessageDeflate: true });
+  const msgs = p.push(buildFrame(OPCODES.TEXT, body, { rsv1: true }));
+  assert.equal(msgs.length, 1);
+  assert.equal(msgs[0].compressed, true);
+  assert.equal(msgs[0].isText, false);
+  assert.ok(msgs[0].payload.length <= 100);
 });
 
 test('deflate bit ignored when extension not negotiated', () => {

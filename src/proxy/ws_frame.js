@@ -26,7 +26,8 @@ const OPCODES = {
 // Cap a single reassembled message so a runaway fragmented stream can't grow
 // the buffer without bound. The proxy applies its own per-connection caps on
 // top of this when persisting.
-const MAX_MESSAGE_BYTES = 1024 * 1024;
+const MAX_MESSAGE_BYTES = 32 * 1024;
+const MAX_OBSERVED_BYTES = 256 * 1024;
 
 // permessage-deflate appends this trailer to every compressed message; RFC 7692
 // requires it be restored before inflating with a raw-deflate context.
@@ -36,9 +37,13 @@ class WsFrameParser {
   // `permessageDeflate` should be true when the handshake negotiated the
   // extension (see parseHandshakeResponse). When set, messages whose first
   // frame carries the RSV1 bit are inflated before being returned.
-  constructor({ maxMessageBytes = MAX_MESSAGE_BYTES, permessageDeflate = false } = {}) {
+  constructor({ maxMessageBytes = MAX_MESSAGE_BYTES, maxObservedBytes = MAX_OBSERVED_BYTES,
+    permessageDeflate = false } = {}) {
     this._buf = Buffer.alloc(0);
     this._maxMessageBytes = maxMessageBytes;
+    this._maxObservedBytes = maxObservedBytes;
+    this._observedBytes = 0;
+    this.stopped = false;
     this._permessageDeflate = permessageDeflate;
 
     // Reassembly state for fragmented data messages.
@@ -54,8 +59,12 @@ class WsFrameParser {
   // `compressed` is true only when the message was deflated AND we could not
   // inflate it — the caller should then store the raw bytes as binary.
   push(chunk) {
-    if (!chunk || chunk.length === 0) return [];
-    this._buf = this._buf.length ? Buffer.concat([this._buf, chunk]) : Buffer.from(chunk);
+    if (this.stopped || !chunk || chunk.length === 0) return [];
+    const remaining = this._maxObservedBytes - this._observedBytes;
+    if (remaining <= 0) { this._stop(); return []; }
+    const observed = chunk.subarray(0, remaining);
+    this._observedBytes += observed.length;
+    this._buf = this._buf.length ? Buffer.concat([this._buf, observed]) : Buffer.from(observed);
 
     const out = [];
     let frame;
@@ -63,7 +72,15 @@ class WsFrameParser {
       const msg = this._assemble(frame);
       if (msg) out.push(msg);
     }
+    if (observed.length < chunk.length) this._stop();
     return out;
+  }
+
+  _stop() {
+    this.stopped = true;
+    this._buf = Buffer.alloc(0);
+    this._fragChunks = [];
+    this._fragSize = 0;
   }
 
   // Pulls one complete frame off the front of the buffer, or returns null if
@@ -88,12 +105,20 @@ class WsFrameParser {
     } else if (len === 127) {
       if (buf.length < offset + 8) return null;
       const big = buf.readBigUInt64BE(offset);
-      // Lengths beyond a few MB are never legitimate WS app frames; treat as
-      // the largest we'll honor so we don't try to allocate absurd buffers.
-      len = big > BigInt(this._maxMessageBytes)
-        ? this._maxMessageBytes
-        : Number(big);
+      if (big > BigInt(this._maxMessageBytes)) {
+        this._stop();
+        return null;
+      }
+      len = Number(big);
       offset += 8;
+    }
+
+    // A frame larger than the capture budget is still forwarded untouched.
+    // Stop observing this direction rather than misaligning the parser with
+    // the remaining bytes of an oversized frame.
+    if (len > this._maxMessageBytes) {
+      this._stop();
+      return null;
     }
 
     let maskKey = null;
@@ -153,6 +178,7 @@ class WsFrameParser {
         // Z_FINISH throws "unexpected end of file" on every real message.
         payloadOut = zlib.inflateRawSync(Buffer.concat([payloadOut, DEFLATE_TAIL]), {
           finishFlush: zlib.constants.Z_SYNC_FLUSH,
+          maxOutputLength: this._maxMessageBytes,
         });
       } catch {
         // Context-takeover streams can't be inflated message-by-message; keep
@@ -235,4 +261,5 @@ module.exports = {
   OPCODES,
   OPCODE_NAMES,
   MAX_MESSAGE_BYTES,
+  MAX_OBSERVED_BYTES,
 };

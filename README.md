@@ -1,8 +1,8 @@
 # ⊕ Claude Intercept
 
-A lightweight MITM (man-in-the-middle) proxy for capturing and analyzing HTTP/S traffic — built for use with [Claude Code](https://claude.ai/code).
+A lightweight MITM (man-in-the-middle) proxy for capturing and analyzing HTTP/S traffic — built for use with [Claude Code](https://claude.ai/code) and [Codex](https://developers.openai.com/codex).
 
-Capture traffic from your Mac, iPhone, Android, or any device on your network. Inspect it in a real-time dark-themed dashboard, then feed it directly to Claude for analysis: document undiscovered APIs, extract auth tokens, map request patterns, and more.
+Capture traffic from your Mac, iPhone, Android, or any device on your network. Inspect it in a real-time dark-themed dashboard, then analyze discovered APIs, authentication patterns, request patterns, and more. Keep exports containing credential values local.
 
 ![Claude Intercept dashboard — Setup & Certs tab](assets/dashboard.png)
 
@@ -16,7 +16,7 @@ Capture traffic from your Mac, iPhone, Android, or any device on your network. I
 - **Device labeling** — each request tagged with its source (This Mac, iPhone, iPad, Android, etc.) with a Device filter dropdown
 - **Bulk actions** — select, export, or delete multiple requests at once
 - **Pause / resume** — stop capturing without interrupting device internet access
-- **Claude Code `/intercept` skill** — start, analyze, and export from the terminal without touching the browser
+- **Claude Code `/intercept` and Codex `$intercept` skill** — start, analyze, and export from the terminal without touching the browser
 - **Export modes** — `api-docs`, `auth`, `summary`, `full` — structured output optimized for Claude analysis
 - **QR code cert install** — scan to install the CA cert on iOS/Android, no typing required
 - **Tailscale support** — detects and displays your Tailscale IP for remote device access
@@ -26,25 +26,43 @@ Capture traffic from your Mac, iPhone, Android, or any device on your network. I
 
 ## Requirements
 
-- **Node.js v22.5+** (uses built-in `node:sqlite` — no native compilation needed)
+- **Node.js v22.15+** (uses built-in `node:sqlite` — no native compilation needed)
 - **macOS or Linux (GNOME/KDE)** for the one-click system-proxy toggle + automated certificate trust; Windows is manual proxy config
-- **Claude Code** for the `/intercept` skill (optional but recommended)
+- **Claude Code or Codex** for agent-driven capture and analysis (optional; the CLI works independently)
 
 ---
 
 ## Installation
 
 ```bash
-git clone https://github.com/your-username/claude-intercept.git ~/claude_intercept
+git clone https://github.com/whaesemeyer/claude-intercept.git ~/claude_intercept
 cd ~/claude_intercept
 bash install.sh
 ```
 
 The installer:
 - Verifies Node.js version
-- Runs `npm install`
-- Installs the `/intercept` Claude Code skill
+- Installs the locked dependency versions with `npm ci --ignore-scripts`
+- Installs a shared Intercept skill for Claude Code and Codex
 - Links `claude-intercept` to your PATH
+
+Choose one agent, or add skills to an existing installation without reinstalling
+dependencies or changing global links:
+
+```bash
+bash install.sh --agent codex
+bash install.sh --agent claude
+bash install.sh --skills-only --agent codex
+```
+
+The default is `--agent both`. Claude Code receives
+`~/.claude/skills/intercept/SKILL.md`; Codex receives
+`~/.agents/skills/intercept/SKILL.md`, its documented user skill location.
+See [Codex skill discovery](https://learn.chatgpt.com/docs/build-skills).
+Commands are rendered with the absolute checkout path, so either agent can
+invoke the CLI from another directory. Re-run the installer after moving the
+checkout or updating the skill. Reinstallation replaces this skill's `SKILL.md`;
+other skills and agent configuration are left alone.
 
 ---
 
@@ -58,7 +76,27 @@ In any Claude Code session:
 ```
 Claude will start the proxy, open the dashboard, and guide you through setup.
 
-### Option B — CLI
+### Option B — Codex skill
+
+In Codex, invoke:
+
+```text
+$intercept capture traffic from my browser
+```
+
+You can also select it with `/skills`. Restart Codex if the newly installed
+skill is not listed. The skill uses `start --daemon --no-open`, JSON status,
+and host-filtered exports through the local CLI. No Claude installation, model
+API key, or MCP configuration is needed. Local shell and network access are
+required; a remote Codex environment cannot capture your local browser unless
+you explicitly route its traffic to that proxy.
+
+For example: `$intercept capture a fresh LinkedIn messaging session and verify
+that the new requests succeed`. The skill checks capture timestamps and keeps
+credential values out of chat. Installing a skill alone does not enable the
+system proxy or install certificate trust.
+
+### Option C — CLI
 
 ```bash
 claude-intercept start
@@ -78,7 +116,8 @@ claude-intercept <command> [options]
 
 | Command | Description |
 |---------|-------------|
-| `start` | Start proxy + dashboard (opens browser automatically) |
+| `start` | Start proxy + dashboard for this machine only (opens browser automatically) |
+| `start --lan` | Allow LAN devices to use the proxy and download its CA certificate; dashboard stays local |
 | `start --proxy-port 9090 --ui-port 9091 --no-open` | Custom ports, no auto-open |
 | `start --daemon` | Run detached in the background (logs to `captures/intercept.log`); `stop`/`status` then work from any shell |
 | `stop` | Stop a running instance |
@@ -87,14 +126,15 @@ claude-intercept <command> [options]
 | `clear` | Delete all captured traffic |
 | `devices` | List device labels seen in captured traffic (`--json` for parity) |
 | `cert` | Print path to the CA certificate |
-| `export --mode api-docs` | Export for Claude — document discovered APIs |
+| `export --mode api-docs` | Generate API documentation locally; may include captured secrets |
 | `export --mode auth` | Extract Bearer tokens, cookies, API keys |
-| `export --mode summary` | High-level traffic overview |
+| `export` or `export --mode summary` | High-level traffic overview (default; excludes raw URLs, headers, and bodies) |
 | `export --mode full --host api.example.com` | Full headers + bodies for one host |
 | `export --device iPhone` | Only captures from a given device (see `devices`) |
-| `export --json` | Structured JSON instead of Markdown — pipe straight into an agent |
-| `proxy on` | Enable system proxy on this Mac |
-| `proxy off` | Disable system proxy |
+| `export --mode summary --json` | Aggregate JSON without captured headers, bodies, or URLs |
+| `export --mode full --json` | Raw capture JSON, including any credentials present |
+| `proxy on` | Enable system proxy for a running Intercept instance on macOS or GNOME/KDE; refuses an unrelated active proxy |
+| `proxy off` | Disable only Intercept-owned system proxy settings |
 | `proxy status` | Show current system proxy state (`--json` for machine-readable) |
 
 ---
@@ -107,7 +147,9 @@ claude-intercept <command> [options]
 2. Click **Enable for This Mac** — macOS will prompt for your password
 3. Browse normally — all HTTP/S traffic is now captured
 
-> **Remember to disable** when done (`proxy off` or the Disable button in the dashboard). Leaving the proxy on after stopping the server will break your network connection.
+Normal shutdown disables only system proxy settings still owned by this
+Intercept instance. If the machine or process exits unexpectedly, run
+`proxy off` before using a direct connection.
 
 ### This Machine (Linux — GNOME / KDE)
 
@@ -137,6 +179,10 @@ node ~/claude_intercept/src/cli.js untrust
 
 ### iPhone / iPad
 
+Start with `claude-intercept start --lan` (or `start --daemon --lan`) so your
+phone can reach the proxy and CA certificate download. If it is already running in local-only
+mode, stop it before restarting with `--lan`.
+
 1. Install the CA certificate:
    - In the dashboard **Setup & Certs → iOS/iPadOS**, scan the QR code with your iPhone camera
    - Tap the link in Safari → install the profile in Settings
@@ -147,6 +193,9 @@ node ~/claude_intercept/src/cli.js untrust
 3. Traffic from all iPhone apps now appears in the dashboard
 
 ### Android
+
+Start with `claude-intercept start --lan` (or `start --daemon --lan`) so your
+phone can reach the proxy and CA certificate download.
 
 1. Configure proxy: **Settings → Wi-Fi → long-press network → Modify → Proxy: Manual**
    - Hostname: your Mac's LAN IP
@@ -167,6 +216,13 @@ sudo security add-trusted-cert -d -r trustRoot \
   ~/claude_intercept/certs/ca.crt
 ```
 
+### Windows (manual)
+
+Set the system or browser HTTP and HTTPS proxy to `127.0.0.1:7777`, then
+import `certs/ca.crt` into the trusted root certificate store. Automatic
+`proxy on` and `proxy off` are unavailable on Windows because this tool cannot
+yet verify and preserve every existing Windows proxy setting.
+
 ### Firefox
 
 Firefox uses its own cert store. Install via:
@@ -182,7 +238,7 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 
 1. Check the boxes next to requests you want to analyze
 2. Click **Export Selected →** → choose an export mode → **Generate Export**
-3. Copy the output and paste into Claude
+3. Review the output. Share only the summary or a redacted detailed export with an agent.
 
 ### From Claude Code
 
@@ -191,10 +247,12 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 ```
 Then ask Claude directly:
 - *"Analyze the last 50 requests and document all API endpoints"*
-- *"Extract all auth tokens from today's captures"*
+- *"Identify which hosts use authentication without showing credential values"*
 - *"What authentication pattern is this app using?"*
 
-Claude will run the export, read the output, and give you a full analysis — no copy/paste needed.
+The skill starts with an aggregate summary. For detailed analysis, it writes
+raw exports to a private local file and reports findings without sharing
+credential values in chat.
 
 ---
 
@@ -202,8 +260,19 @@ Claude will run the export, read the output, and give you a full analysis — no
 
 - The CA private key is generated once on your machine and stored at `certs/ca.key`. It never leaves your machine and is excluded from git.
 - Each machine gets a unique CA — certificates from one installation cannot decrypt traffic intercepted by another.
-- All captured data is stored locally in `captures/captures.db` (SQLite), also excluded from git.
-- The dashboard binds to `0.0.0.0` so phones on your LAN can reach it — do not run this on untrusted networks.
+- All captured data is stored locally in `captures/captures.db` (SQLite), also excluded from git. The database and private keys are owner-only files, but the database is not encrypted; other processes running as your user can read it.
+- The proxy and dashboard bind to `127.0.0.1` by default. `start --lan` lets
+  other devices use the proxy and download the public CA certificate. The
+  dashboard, capture API, and admin routes remain accessible only from this
+  machine. LAN mode binds to all network interfaces and the proxy has no
+  password. LAN clients can reach public destinations through it, but local and
+  private destinations are blocked. Use it only on a trusted network and stop
+  it when finished.
+- The dashboard has no login. Any local account that can connect to this
+  machine's loopback interface can inspect captures and use dashboard controls;
+  run it on a trusted single-user workstation.
+- API docs, full, and authentication exports can contain passwords, cookies, and tokens.
+  Keep those exports local and do not paste them into an agent chat.
 
 > **This tool is for authorized testing and personal use only.** Only intercept traffic from devices and accounts you own or have explicit permission to test.
 
@@ -217,7 +286,7 @@ claude_intercept/
 │   ├── cli.js              # Commander-based CLI entry point
 │   ├── analyze.js          # Export formatter for Claude (api-docs / auth / summary / full)
 │   ├── setup_wizard.js     # Per-platform setup instructions
-│   ├── system_proxy.js     # macOS/Linux/Windows system proxy toggle
+│   ├── system_proxy.js     # macOS/Linux system proxy toggle; Windows manual
 │   ├── proxy/
 │   │   ├── index.js        # MITM proxy — HTTP forward + CONNECT tunnel + TLS unwrap
 │   │   └── cert_manager.js # CA generation + per-host certificate signing (node-forge)
@@ -228,7 +297,8 @@ claude_intercept/
 │       └── public/
 │           └── index.html  # Single-file dashboard (vanilla JS, dark theme)
 ├── skill.md                # Claude Code /intercept skill definition
-├── install.sh              # Installer (deps, skill, PATH link)
+├── scripts/install-skills.js # Shared Claude Code/Codex skill installer
+├── install.sh              # Installer (deps, skills, PATH link)
 ├── captures/               # Runtime — SQLite DB (gitignored)
 └── certs/                  # Runtime — CA + leaf keys (gitignored)
 ```

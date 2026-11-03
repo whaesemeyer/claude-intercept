@@ -217,10 +217,25 @@ function untrustCertLinux(opts = {}) {
  */
 function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscaleIp = null, opts = {}) {
   const ip = lanIp || '<your-mac-ip>';
-  const uiPort = 7778; // always dashboard port
+  const uiPort = opts.uiPort || 7778;
+  const lanEnabled = opts.lanEnabled !== false;
   const certUrl = `http://${ip}:${uiPort}/api/cert`;
   const localCertUrl = `http://127.0.0.1:${uiPort}/api/cert`;
   const tailscaleCertUrl = tailscaleIp ? `http://${tailscaleIp}:${uiPort}/api/cert` : null;
+
+  if (!lanEnabled && (platform === 'ios' || platform === 'android')) {
+    return {
+      platform,
+      steps: [{
+        title: 'Enable LAN access for this device',
+        html: 'The proxy currently accepts connections from this machine only. Stop Claude Intercept, then restart it with <code>claude-intercept start --lan</code> (add <code>--daemon</code> if you use background mode). This lets your device use the proxy and download the CA certificate; the dashboard stays on this machine. Reopen this tab to continue setup.',
+      }],
+      proxyPort,
+      lanIp: ip,
+      tailscaleIp: null,
+      topWarning: null,
+    };
+  }
 
   // Tailor the Linux tab to the actual distro/desktop. Injectable for tests.
   const lenv = opts.linuxEnv || (platform === 'linux'
@@ -254,13 +269,13 @@ function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscal
       },
       {
         title: 'Disable when done',
-        html: `Always disable the proxy when you\'re finished. Claude Intercept restores your previous network settings automatically.`,
+        html: `Always disable the proxy when you\'re finished. Claude Intercept turns off only the system proxy settings it enabled and still controls; it does not restore an older custom proxy configuration.`,
         code: `node ~/claude_intercept/src/cli.js proxy off`,
       },
       {
         title: 'For terminal / CLI tools',
         html: `Many CLI tools (<code>curl</code>, <code>npm</code>, <code>git</code>, <code>wget</code>) use environment variables rather than the system proxy. Set these in your shell or prefix individual commands:`,
-        code: `# Set for current session:\nexport http_proxy=http://127.0.0.1:${proxyPort}\nexport https_proxy=http://127.0.0.1:${proxyPort}\nexport HTTP_PROXY=http://127.0.0.1:${proxyPort}\nexport HTTPS_PROXY=http://127.0.0.1:${proxyPort}\n\n# Or for a single command:\nhttps_proxy=http://127.0.0.1:${proxyPort} curl -sk https://api.example.com/v1/me | jq .`,
+        code: `# Set for current session:\nexport http_proxy=http://127.0.0.1:${proxyPort}\nexport https_proxy=http://127.0.0.1:${proxyPort}\nexport HTTP_PROXY=http://127.0.0.1:${proxyPort}\nexport HTTPS_PROXY=http://127.0.0.1:${proxyPort}\n\n# Or for a single command:\nhttps_proxy=http://127.0.0.1:${proxyPort} curl -s https://api.example.com/v1/me | jq .`,
       },
       {
         title: 'For Node.js apps',
@@ -343,7 +358,7 @@ function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscal
         title: 'Disable when done',
         html: `When you\'re finished, <strong>always turn off the proxy on your iPhone before stopping claude-intercept</strong> — if the proxy stops while your phone still points to it, your iPhone will have no internet access until you disable it manually.<br><br>
         Go to <strong>Settings → Wi-Fi → ⓘ → Configure Proxy → Off</strong> → Save.<br><br>
-        You can leave the certificate installed — it\'s harmless and saves time next session.`,
+        The CA remains trusted after this session. Remove its trust when you no longer need it, especially if this machine or its CA key may have been compromised.`,
         warning: true,
       },
     ],
@@ -421,8 +436,7 @@ function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscal
       },
       {
         title: 'Configure system proxy',
-        html: `<strong>Settings → Network & Internet → Proxy → Manual proxy setup</strong>.<br>Toggle on <em>Use a proxy server</em>, set address <code>127.0.0.1</code>, port <code>${proxyPort}</code>.<br>Click <strong>Save</strong>.`,
-        code: `# Or via PowerShell:\nSet-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyServer -Value "127.0.0.1:${proxyPort}"\nSet-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings' -Name ProxyEnable -Value 1`,
+        html: `In <strong>Settings → Network &amp; Internet → Proxy</strong>, inspect and save your current proxy settings first. If a work or VPN proxy is already configured, do not replace it. Otherwise, turn on <em>Use a proxy server</em> under Manual proxy setup, set address <code>127.0.0.1</code> and port <code>${proxyPort}</code>, then click <strong>Save</strong>. Restore the saved settings manually when finished.`,
       },
       {
         title: 'Verify',
