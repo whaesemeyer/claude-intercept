@@ -151,6 +151,33 @@ test('summary analysis reads only projected capture metadata', async t => {
   ]);
 });
 
+test('WebSocket frame history is paged and only available for valid WS captures', async t => {
+  let frameQuery;
+  const captureQueries = [];
+  t.mock.method(db, 'getCaptureById', (id, options) => {
+    captureQueries.push(options);
+    return id === 1 ? { id, method: 'WS' } : null;
+  });
+  t.mock.method(db, 'getWsFrameCount', () => 180);
+  t.mock.method(db, 'getWsFrames', (_id, options) => {
+    frameQuery = options;
+    return [];
+  });
+  const ui = createUIServer({ uiPort: 0 });
+  t.after(() => ui.close());
+  const port = await ui.listen();
+  assert.equal((await request(port, '/api/captures/nope/frames')).status, 400);
+  assert.equal((await request(port, '/api/captures/2/frames')).status, 404);
+  assert.equal((await request(port, '/api/captures/1/frames?limit=101')).status, 400);
+  assert.equal((await request(port, '/api/captures/1/frames?offset=-1')).status, 400);
+  assert.equal((await request(port, '/api/captures/1/frames?limit=1&limit=2')).status, 400);
+  const tail = await request(port, '/api/captures/1/frames?limit=50&tail=true');
+  assert.equal(tail.status, 200);
+  assert.equal(JSON.parse(tail.body).offset, 130);
+  assert.deepEqual(frameQuery, { limit: 50, offset: 130 });
+  assert.ok(captureQueries.every(options => options?.summaryOnly === true));
+});
+
 test('batch deletion handles an absent JSON body under Express 5', async t => {
   const deleted = [];
   t.mock.method(db, 'deleteCaptures', ids => { deleted.push(ids); return ids.length; });

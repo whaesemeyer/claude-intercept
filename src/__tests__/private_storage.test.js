@@ -130,6 +130,73 @@ test('capture queries bound invalid limits and empty deletes are harmless', t =>
   assert.deepEqual(result, { length: 100, firstId: 120, emptyDelete: 0, count: 120 });
 });
 
+test('WebSocket frame storage bounds pages and deletes frame contents with captures', t => {
+  const { modulePath } = fixture(t, 'storage/db.js');
+  const result = runFixture(modulePath, `
+    const storage = require(process.argv[1]);
+    const conn = storage.init();
+    const insert = conn.prepare("INSERT INTO captures (timestamp, method, url, host, path) VALUES (1, 'WS', 'wss://example.com/', 'example.com', '/')");
+    const id = Number(insert.run().lastInsertRowid);
+    const frame = { connectionId: id, timestamp: 1, direction: 'client→server',
+      opcode: 1, isText: true, payload: 'x'.repeat(100), payloadSize: 100 };
+    let last;
+    for (let i = 0; i < 205; i++) last = storage.insertWsFrame(frame);
+    let oversized = false;
+    try { storage.insertWsFrame({ ...frame, payload: 'x'.repeat(9000) }); }
+    catch (err) { oversized = err instanceof RangeError; }
+    const before = { total: storage.getWsFrameCount(id), page: storage.getWsFrames(id, { limit: 5000 }).length,
+      last, oversized };
+    const deleted = storage.deleteCaptures([id]);
+    const lateAfterDelete = storage.insertWsFrame(frame);
+    const afterDelete = storage.getWsFrameCount(id);
+    const id2 = Number(insert.run().lastInsertRowid);
+    storage.insertWsFrame({ ...frame, connectionId: id2 });
+    storage.clearCaptures();
+    const lateAfterClear = storage.insertWsFrame({ ...frame, connectionId: id2 });
+    console.log(JSON.stringify({ before, deleted, afterDelete,
+      lateAfterDelete, lateAfterClear, afterClear: storage.getWsFrameCount(id2),
+      foreignKeys: conn.prepare('PRAGMA foreign_keys').get().foreign_keys }));
+  `);
+  assert.deepEqual(result, {
+    before: { total: 200, page: 100, last: null, oversized: true },
+    deleted: 1, afterDelete: 0, lateAfterDelete: null,
+    lateAfterClear: null, afterClear: 0, foreignKeys: 1,
+  });
+});
+
+test('legacy frame tables cannot regain payloads after an active capture is deleted', t => {
+  const { modulePath } = fixture(t, 'storage/db.js');
+  const result = runFixture(modulePath, `
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const { DatabaseSync } = require('node:sqlite');
+    const dir = path.join(path.dirname(process.argv[1]), '../../captures');
+    fs.mkdirSync(dir, { recursive: true });
+    const legacy = new DatabaseSync(path.join(dir, 'captures.db'));
+    legacy.exec(\`CREATE TABLE ws_frames (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, connection_id INTEGER NOT NULL,
+      timestamp INTEGER NOT NULL, direction TEXT NOT NULL, opcode INTEGER NOT NULL,
+      is_text INTEGER NOT NULL, payload TEXT NOT NULL, payload_size INTEGER NOT NULL,
+      truncated INTEGER NOT NULL DEFAULT 0, compressed INTEGER NOT NULL DEFAULT 0
+    )\`);
+    legacy.exec("INSERT INTO ws_frames (connection_id, timestamp, direction, opcode, is_text, payload, payload_size) VALUES (999, 1, 'client', 1, 1, 'orphan-secret', 13)");
+    legacy.close();
+    const storage = require(process.argv[1]);
+    const conn = storage.init();
+    const id = storage.insertCapture({ timestamp: 1, method: 'WS', url: 'wss://example.com/',
+      host: 'example.com', path: '/', responseStatus: 101 });
+    const frame = { connectionId: id, timestamp: 2, direction: 'client→server',
+      opcode: 1, isText: true, payload: 'private', payloadSize: 7 };
+    const first = storage.insertWsFrame(frame);
+    storage.deleteCaptures([id]);
+    const late = storage.insertWsFrame(frame);
+    console.log(JSON.stringify({ first: first > 0, late, count: storage.getWsFrameCount(id),
+      orphanCount: storage.getWsFrameCount(999),
+      legacyTable: conn.prepare('PRAGMA foreign_key_list(ws_frames)').all().length === 0 }));
+  `);
+  assert.deepEqual(result, { first: true, late: null, count: 0, orphanCount: 0, legacyTable: true });
+});
+
 test('capture database stops growing at its limit and resumes after clearing', t => {
   const { modulePath } = fixture(t, 'storage/db.js');
   const result = runFixture(modulePath, `
