@@ -17,7 +17,7 @@ Capture traffic from your Mac, iPhone, Android, or any device on your network. I
 - **Bulk actions** — select, export, or delete multiple requests at once
 - **Pause / resume** — stop capturing without interrupting device internet access
 - **Claude Code `/intercept` and Codex `$intercept` skill** — start, analyze, and export from the terminal without touching the browser
-- **Export modes** — `api-docs`, `auth`, `summary`, `full` — structured output optimized for Claude analysis
+- **Export modes** — `api-docs`, `auth`, `summary`, `full` — structured output for local or agent-assisted analysis
 - **QR code cert install** — scan to install the CA cert on iOS/Android, no typing required
 - **Tailscale support** — detects and displays your Tailscale IP for remote device access
 - **Zero native compilation** — uses Node.js built-in `node:sqlite` (no `node-gyp`, no Xcode build step)
@@ -74,27 +74,29 @@ In any Claude Code session:
 ```
 /intercept
 ```
-Claude will start the proxy, open the dashboard, and guide you through setup.
+Claude will check proxy state, start it when needed, and guide you through setup.
 
 ### Option B — Codex skill
 
-In Codex, invoke:
+In Codex CLI or the IDE extension, invoke:
 
 ```text
 $intercept capture traffic from my browser
 ```
 
-You can also select it with `/skills`. Restart Codex if the newly installed
-skill is not listed. The skill uses `start --daemon --no-open`, JSON status,
+You can also select it with `/skills`. In the ChatGPT desktop app, find the
+Intercept skill in the **Skills** sidebar and use a local Codex chat. Codex
+detects skill changes automatically; restart if the skill is not listed. The
+skill uses `start --daemon --no-open`, JSON status,
 and host-filtered exports through the local CLI. No Claude installation, model
 API key, or MCP configuration is needed. Local shell and network access are
 required; a remote Codex environment cannot capture your local browser unless
 you explicitly route its traffic to that proxy.
 
-For example: `$intercept capture a fresh LinkedIn messaging session and verify
-that the new requests succeed`. The skill checks capture timestamps and keeps
-credential values out of chat. Installing a skill alone does not enable the
-system proxy or install certificate trust.
+For example: `$intercept capture a fresh sign-in session from my browser and
+verify that the new requests succeed`. The skill checks capture timestamps and
+keeps credential values out of chat. Installing a skill alone does not enable
+the system proxy or install certificate trust.
 
 ### Option C — CLI
 
@@ -126,13 +128,17 @@ claude-intercept <command> [options]
 | `clear` | Delete all captured traffic |
 | `devices` | List device labels seen in captured traffic (`--json` for parity) |
 | `cert` | Print path to the CA certificate |
-| `export --mode api-docs` | Generate API documentation locally; may include captured secrets |
+| `export --mode api-docs` | Generate endpoint documentation with header names and JSON body structure; URLs and field names may still be sensitive |
 | `export --mode auth` | Extract Bearer tokens, cookies, API keys |
 | `export` or `export --mode summary` | High-level traffic overview (default; excludes raw URLs, headers, and bodies) |
 | `export --mode full --host api.example.com` | Full headers + bodies for one host |
 | `export --device iPhone` | Only captures from a given device (see `devices`) |
+| `export --after-id 42` | Only captures newer than capture ID 42; use `status --json` to record `stats.lastId` before a test |
 | `export --mode summary --json` | Aggregate JSON without captured headers, bodies, or URLs |
+| `export --mode api-docs --json` | Structured endpoint JSON with header names and body structure, without header or body values |
+| `export --mode auth --json` | JSON-wrapped credential findings, without unrelated raw captures |
 | `export --mode full --json` | Raw capture JSON, including any credentials present |
+| `export --offset 100 --limit 100` | Page through older matching captures; detailed modes cap each page at 25–100 captures |
 | `proxy on` | Enable system proxy for a running Intercept instance on macOS or GNOME/KDE; refuses an unrelated active proxy |
 | `proxy off` | Disable only Intercept-owned system proxy settings |
 | `proxy status` | Show current system proxy state (`--json` for machine-readable) |
@@ -232,7 +238,7 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 
 ---
 
-## Analyzing Traffic with Claude
+## Analyzing Traffic with an Agent
 
 ### From the dashboard
 
@@ -240,12 +246,13 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 2. Click **Export Selected →** → choose an export mode → **Generate Export**
 3. Review the output. Share only the summary or a redacted detailed export with an agent.
 
-### From Claude Code
+### From Claude Code or Codex CLI
 
-```
+```text
 /intercept
+$intercept
 ```
-Then ask Claude directly:
+Then ask the agent:
 - *"Analyze the last 50 requests and document all API endpoints"*
 - *"Identify which hosts use authentication without showing credential values"*
 - *"What authentication pattern is this app using?"*
@@ -261,6 +268,13 @@ credential values in chat.
 - The CA private key is generated once on your machine and stored at `certs/ca.key`. It never leaves your machine and is excluded from git.
 - Each machine gets a unique CA — certificates from one installation cannot decrypt traffic intercepted by another.
 - All captured data is stored locally in `captures/captures.db` (SQLite), also excluded from git. The database and private keys are owner-only files, but the database is not encrypted; other processes running as your user can read it.
+- A new capture database has a 512 MiB page limit. When it fills, the proxy
+  keeps forwarding but stops saving new captures; the dashboard shows a
+  warning. Clear or delete captures to reuse database pages; this does not
+  necessarily shrink the file on disk. Set
+  `CLAUDE_INTERCEPT_MAX_CAPTURE_MB` to an integer from 16 to 8192 before
+  starting to choose a different limit. Existing larger databases are not
+  truncated.
 - The proxy and dashboard bind to `127.0.0.1` by default. `start --lan` lets
   other devices use the proxy and download the public CA certificate. The
   dashboard, capture API, and admin routes remain accessible only from this
@@ -271,8 +285,10 @@ credential values in chat.
 - The dashboard has no login. Any local account that can connect to this
   machine's loopback interface can inspect captures and use dashboard controls;
   run it on a trusted single-user workstation.
-- API docs, full, and authentication exports can contain passwords, cookies, and tokens.
-  Keep those exports local and do not paste them into an agent chat.
+- API documentation omits captured header and body values, but URL paths,
+  hosts, and field names can still be sensitive. Authentication and full
+  exports include credential values. Review exports locally before sharing;
+  keep authentication and full exports out of agent chats.
 
 > **This tool is for authorized testing and personal use only.** Only intercept traffic from devices and accounts you own or have explicit permission to test.
 
@@ -284,7 +300,7 @@ credential values in chat.
 claude_intercept/
 ├── src/
 │   ├── cli.js              # Commander-based CLI entry point
-│   ├── analyze.js          # Export formatter for Claude (api-docs / auth / summary / full)
+│   ├── analyze.js          # Export formatter (api-docs / auth / summary / full)
 │   ├── setup_wizard.js     # Per-platform setup instructions
 │   ├── system_proxy.js     # macOS/Linux system proxy toggle; Windows manual
 │   ├── proxy/

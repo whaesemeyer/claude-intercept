@@ -151,6 +151,65 @@ test('trustCertLinux: ordering, elevated system-store, steps 4 & 5 never elevate
   assert.ok(result.steps.every(s => typeof s.name === 'string' && 'ok' in s));
 });
 
+test('trustCertLinux uses and removes a private CA copy for elevated installation', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-ca-fixture-'));
+  const caPath = path.join(fixture, 'ca.crt');
+  fs.writeFileSync(caPath, 'fixture certificate');
+  let stagedCa;
+  try {
+    const result = trustCertLinux({
+      env: { family: 'debian', hasCertutil: true },
+      caPath,
+      home: fixture,
+      runAdmin: (argv) => {
+        assert.deepStrictEqual(argv.slice(0, 2), ['/bin/sh', '-c']);
+        const match = argv[2].match(/^cp '([^']+)' \/usr\/local\/share\/ca-certificates\/claude-intercept\.crt/);
+        assert.ok(match, 'the privileged command must quote the CA path');
+        stagedCa = match[1];
+        assert.notStrictEqual(stagedCa, caPath);
+        assert.strictEqual(fs.readFileSync(stagedCa, 'utf8'), 'fixture certificate');
+        assert.strictEqual(fs.statSync(path.dirname(stagedCa)).mode & 0o777, 0o700);
+        assert.strictEqual(fs.statSync(stagedCa).mode & 0o777, 0o600);
+        return { ok: true };
+      },
+      spawn: () => ({ status: 0 }),
+    });
+    assert.strictEqual(result.ok, true);
+    assert.ok(stagedCa);
+    assert.strictEqual(fs.existsSync(path.dirname(stagedCa)), false,
+      'the staged CA and its private directory must be removed');
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test('trustCertLinux manual fallback names the durable CA path', () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-ca-fallback-'));
+  const caPath = path.join(fixture, 'ca.crt');
+  fs.writeFileSync(caPath, 'fixture certificate');
+  let stagedCa;
+  try {
+    const result = trustCertLinux({
+      env: { family: 'debian', hasCertutil: true },
+      caPath,
+      home: fixture,
+      runAdmin: (argv) => {
+        stagedCa = argv[2].match(/^cp '([^']+)' /)?.[1];
+        return { ok: false, needsManual: true, error: `Run manually: ${argv.join(' ')}` };
+      },
+      spawn: () => ({ status: 0 }),
+    });
+    const systemStep = result.steps.find(step => step.name === 'Install in system trust store');
+    assert.strictEqual(result.ok, false);
+    assert.ok(systemStep.detail.includes(caPath));
+    assert.ok(stagedCa);
+    assert.ok(!systemStep.detail.includes(stagedCa), 'manual guidance must not use a deleted temporary path');
+    assert.strictEqual(fs.existsSync(path.dirname(stagedCa)), false);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test('trustCertLinux: missing CA fails fast without elevating', () => {
   const adminCalls = [];
   const result = trustCertLinux({

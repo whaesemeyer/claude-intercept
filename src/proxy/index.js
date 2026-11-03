@@ -9,6 +9,7 @@ const os = require('node:os');
 const { URL } = require('url');
 const certManager = require('./cert_manager');
 const { tryDecodeBody, MAX_BODY } = require('./body');
+const MAX_ACTIVE_CAPTURE_BYTES = 32 * MAX_BODY;
 
 // LAN clients may use the proxy for public destinations, but must not be able
 // to reach this machine's dashboard, cloud metadata endpoints, or other local
@@ -127,27 +128,46 @@ function deriveDeviceLabel(ip, ua) {
   return ip;
 }
 
-function captureBody() {
+function captureBody(budget) {
   const chunks = [];
   let stored = 0;
   let total = 0;
+  let budgetLimited = false;
+  let released = false;
   return {
     add(chunk) {
+      if (released) return;
       total += chunk.length;
-      if (stored >= MAX_BODY) return;
-      const kept = chunk.subarray(0, MAX_BODY - stored);
-      chunks.push(Buffer.from(kept));
-      stored += kept.length;
+      if (budgetLimited || stored >= MAX_BODY) return;
+      const bodyRoom = MAX_BODY - stored;
+      const budgetRoom = Math.max(0, budget.max - budget.used);
+      const keepBytes = Math.min(chunk.length, bodyRoom, budgetRoom);
+      if (keepBytes > 0) {
+        chunks.push(Buffer.from(chunk.subarray(0, keepBytes)));
+        stored += keepBytes;
+        budget.used += keepBytes;
+      }
+      // Once a body has a gap, do not append later chunks if another stream
+      // frees memory: that would misrepresent the captured payload.
+      if (keepBytes < Math.min(chunk.length, bodyRoom)) budgetLimited = true;
     },
     decode(contentType, contentEncoding) {
-      if (total > MAX_BODY) {
+      if (total > MAX_BODY || budgetLimited) {
         return {
-          text: `<body ${total} bytes — capture limited to ${MAX_BODY} bytes>`,
+          text: budgetLimited
+            ? `<body ${total} bytes — capture limited by active memory budget>`
+            : `<body ${total} bytes — capture limited to ${MAX_BODY} bytes>`,
           encoding: contentEncoding || 'identity',
           originalSize: total,
         };
       }
       return tryDecodeBody(Buffer.concat(chunks, stored), contentType, contentEncoding);
+    },
+    release() {
+      if (released) return;
+      released = true;
+      budget.used -= stored;
+      chunks.length = 0;
     },
     get size() { return total; },
   };
@@ -182,6 +202,11 @@ function stripHopByHopHeaders(headers) {
   return result;
 }
 
+function captureRequestHeaders(headers) {
+  return Object.fromEntries(Object.entries(headers).filter(([name]) =>
+    !/^proxy-(?:authorization|authenticate|connection)$/i.test(name)));
+}
+
 function webSocketHeaders(headers, host, port) {
   const result = Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]));
   for (const name of String(result.connection || '').split(',')) {
@@ -205,6 +230,8 @@ class ProxyServer {
     this.db = db;
     this.broadcast = broadcast; // fn(eventObj) → WebSocket broadcast
     this.paused = false;
+    this._captureQuotaReported = false;
+    this._captureBudget = { max: MAX_ACTIVE_CAPTURE_BYTES, used: 0 };
 
     // Handles plain HTTP proxy requests
     this.server = http.createServer((req, res) => {
@@ -393,7 +420,7 @@ class ProxyServer {
         url: `wss://${host}${req.url}`,
         host,
         path: req.url,
-        requestHeaders: req.headers,
+        requestHeaders: captureRequestHeaders(req.headers),
         requestBody: '',
         requestEncoding: 'identity',
         requestBodySize: 0,
@@ -409,10 +436,11 @@ class ProxyServer {
       };
       try {
         const id = this.db.insertCapture(capture);
+        this._captureQuotaReported = false;
         capture.id = id;
         this.broadcast({ type: 'capture', data: this._serializeCapture(capture) });
       } catch (err) {
-        console.error('[proxy] WS capture error:', err.message);
+        this._captureError(err, 'WS');
       }
     };
 
@@ -426,9 +454,15 @@ class ProxyServer {
       servername: net.isIP(host) ? undefined : host,
       ALPNProtocols: ['http/1.1'],
     });
-    upstream.setTimeout(15_000, () => cleanup(0));
+    // A socket inactivity timeout is not a reliable deadline for every phase
+    // of DNS, TCP, and TLS setup. Bound the whole upstream handshake.
+    const handshakeTimer = setTimeout(() => cleanup(0), 15_000);
 
+    let closed = false;
     const cleanup = (status) => {
+      if (closed) return;
+      closed = true;
+      clearTimeout(handshakeTimer);
       finalize(status);
       try { upstream.destroy(); } catch {}
       try { clientSocket.destroy(); } catch {}
@@ -443,7 +477,9 @@ class ProxyServer {
     upstream.on('close', () => cleanup(101));
 
     upstream.once('secureConnect', () => {
-      upstream.setTimeout(0);
+      if (closed) return;
+      clearTimeout(handshakeTimer);
+      upstream.setTimeout(300_000, () => cleanup(0));
       try { upstream.setNoDelay?.(true); } catch {}
 
       const reqLine = `${req.method} ${req.url} HTTP/1.1\r\n`;
@@ -468,7 +504,8 @@ class ProxyServer {
   // ── Shared forward + capture logic ───────────────────────────────────────
 
   async _forward({ req, res, host, port, path, isHttps, connectAddress }) {
-    const requestCapture = captureBody();
+    const requestCapture = captureBody(this._captureBudget);
+    let responseCapture;
     const startMs = Date.now();
     const rawIp = req.socket?.remoteAddress || '';
     const clientIp = rawIp.replace(/^::ffff:/, '');
@@ -490,100 +527,139 @@ class ProxyServer {
 
     const lib = isHttps ? https : http;
 
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        resolve();
-      };
-      const proxyReq = lib.request(options, (proxyRes) => {
-        const responseCapture = captureBody();
-        const passHeaders = stripHopByHopHeaders(proxyRes.headers);
+    try {
+      return await new Promise((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          resolve();
+        };
+        const proxyReq = lib.request(options, (proxyRes) => {
+          if (settled) {
+            proxyRes.destroy();
+            return;
+          }
+          responseCapture = captureBody(this._captureBudget);
+          const passHeaders = stripHopByHopHeaders(proxyRes.headers);
 
-        try {
-          res.writeHead(proxyRes.statusCode, passHeaders);
-        } catch {
-          proxyRes.destroy();
-          return finish();
-        }
-
-        proxyRes.on('data', (chunk) => responseCapture.add(chunk));
-        proxyRes.on('end', () => {
-          const duration = Date.now() - startMs;
-          const contentType = proxyRes.headers['content-type'] || '';
-          const contentEncoding = proxyRes.headers['content-encoding'] || '';
-
-          const reqDecoded = requestCapture.decode(
-            req.headers['content-type'],
-            req.headers['content-encoding'] || '',
-          );
-          const resDecoded = responseCapture.decode(contentType, contentEncoding);
-
-          const capture = {
-            timestamp: Date.now(),
-            method: req.method,
-            url: `${isHttps ? 'https' : 'http'}://${host}${path}`,
-            host,
-            path,
-            requestHeaders: req.headers,
-            requestBody: reqDecoded.text,
-            requestEncoding: reqDecoded.encoding,
-            requestBodySize: requestCapture.size,
-            responseStatus: proxyRes.statusCode,
-            responseHeaders: proxyRes.headers,
-            responseBody: resDecoded.text,
-            responseEncoding: resDecoded.encoding,
-            responseBodySize: responseCapture.size,
-            contentType,
-            duration,
-            clientIp,
-            clientLabel,
-          };
-
-          if (!this.paused) {
-            try {
-              const id = this.db.insertCapture(capture);
-              capture.id = id;
-              this.broadcast({ type: 'capture', data: this._serializeCapture(capture) });
-            } catch (err) {
-              console.error('[proxy] capture error:', err.message);
-            }
+          try {
+            res.writeHead(proxyRes.statusCode, passHeaders);
+          } catch {
+            proxyRes.destroy();
+            return finish();
           }
 
+          proxyRes.on('data', (chunk) => responseCapture.add(chunk));
+          proxyRes.on('end', () => {
+            if (settled) return;
+            const duration = Date.now() - startMs;
+            const contentType = proxyRes.headers['content-type'] || '';
+            const contentEncoding = proxyRes.headers['content-encoding'] || '';
+
+            const reqDecoded = requestCapture.decode(
+              req.headers['content-type'],
+              req.headers['content-encoding'] || '',
+            );
+            const resDecoded = responseCapture.decode(contentType, contentEncoding);
+
+            const capture = {
+              timestamp: Date.now(),
+              method: req.method,
+              url: `${isHttps ? 'https' : 'http'}://${host}${path}`,
+              host,
+              path,
+              requestHeaders: captureRequestHeaders(req.headers),
+              requestBody: reqDecoded.text,
+              requestEncoding: reqDecoded.encoding,
+              requestBodySize: requestCapture.size,
+              responseStatus: proxyRes.statusCode,
+              responseHeaders: proxyRes.headers,
+              responseBody: resDecoded.text,
+              responseEncoding: resDecoded.encoding,
+              responseBodySize: responseCapture.size,
+              contentType,
+              duration,
+              clientIp,
+              clientLabel,
+            };
+
+            if (!this.paused) {
+              try {
+                const id = this.db.insertCapture(capture);
+                this._captureQuotaReported = false;
+                capture.id = id;
+                this.broadcast({ type: 'capture', data: this._serializeCapture(capture) });
+              } catch (err) {
+                this._captureError(err, 'HTTP');
+              }
+            }
+
+            finish();
+          });
+
+          proxyRes.on('error', (err) => { res.destroy?.(err); finish(); });
+          proxyRes.on('aborted', () => { res.destroy?.(); finish(); });
+          proxyRes.on('close', () => {
+            if (!proxyRes.complete) res.destroy?.();
+            finish();
+          });
+          proxyRes.pipe(res);
+        });
+
+        proxyReq.on('error', (err) => {
+          if (settled) return;
+          if (!res.headersSent && !res.destroyed) {
+            res.writeHead(502);
+            res.end('Bad Gateway');
+          } else {
+            res.destroy?.(err);
+          }
           finish();
         });
 
-        proxyRes.on('error', (err) => { res.destroy?.(err); finish(); });
-        proxyRes.on('aborted', () => { res.destroy?.(); finish(); });
-        proxyRes.on('close', () => {
-          if (!proxyRes.complete) res.destroy?.();
-          finish();
+        proxyReq.setTimeout(120_000, () => proxyReq.destroy(new Error('Upstream timeout')));
+        req.on('error', err => proxyReq.destroy(err));
+        req.on('close', () => { if (req.aborted) proxyReq.destroy(); });
+        res.on?.('close', () => {
+          if (!res.writableEnded) {
+            proxyReq.destroy();
+            finish();
+          }
         });
-        proxyRes.pipe(res);
+        res.on?.('error', err => { proxyReq.destroy(err); finish(); });
+
+        // Forward the complete request with backpressure. Keep only a bounded
+        // copy for the capture database; large uploads must never be truncated.
+        req.on('data', chunk => requestCapture.add(chunk));
+        req.pipe(proxyReq);
       });
+    } finally {
+      requestCapture.release();
+      responseCapture?.release();
+    }
+  }
 
-      proxyReq.on('error', (err) => {
-        if (!res.headersSent && !res.destroyed) {
-          res.writeHead(502);
-          res.end('Bad Gateway');
-        } else {
-          res.destroy?.(err);
-        }
-        finish();
-      });
-
-      proxyReq.setTimeout(120_000, () => proxyReq.destroy(new Error('Upstream timeout')));
-      req.on('error', err => proxyReq.destroy(err));
-      req.on('close', () => { if (req.aborted) proxyReq.destroy(); });
-      res.on?.('close', () => { if (!res.writableEnded) proxyReq.destroy(); });
-      res.on?.('error', err => { proxyReq.destroy(err); finish(); });
-
-      // Forward the complete request with backpressure. Keep only a bounded
-      // copy for the capture database; large uploads must never be truncated.
-      req.on('data', chunk => requestCapture.add(chunk));
-      req.pipe(proxyReq);
-    });
+  _captureError(err, channel) {
+    if (err.code === 'CAPTURE_QUOTA_EXCEEDED') {
+      if (this._captureQuotaReported) return;
+      this._captureQuotaReported = true;
+      console.error('[proxy] Capture storage is full; forwarding continues without new captures');
+      let stats = {};
+      try { stats = this.db.getStats?.() || {}; } catch {}
+      try {
+        this.broadcast({
+          type: 'captureStorageFull',
+          data: {
+            storageBytes: stats.storageBytes,
+            storageLimitBytes: stats.storageLimitBytes,
+            storageLimitReached: true,
+          },
+        });
+      } catch {}
+      return;
+    }
+    console.error(`[proxy] ${channel} capture error:`, err.message);
   }
 
   _serializeCapture(c) {
@@ -594,18 +670,8 @@ class ProxyServer {
       url: c.url,
       host: c.host,
       path: c.path,
-      requestHeaders: c.requestHeaders,
-      requestBodyPreview: typeof c.requestBody === 'string' ? c.requestBody.slice(0, 512) : '',
-      requestEncoding: c.requestEncoding || 'identity',
-      requestBodySize: c.requestBodySize || 0,
       responseStatus: c.responseStatus,
-      responseHeaders: c.responseHeaders,
-      responseBodyPreview: typeof c.responseBody === 'string' ? c.responseBody.slice(0, 512) : '',
-      responseEncoding: c.responseEncoding || 'identity',
-      responseBodySize: c.responseBodySize || 0,
-      contentType: c.contentType,
       duration: c.duration,
-      clientIp: c.clientIp,
       clientLabel: c.clientLabel,
     };
   }

@@ -13,6 +13,16 @@ const db = require('../storage/db');
 const certManager = require('../proxy/cert_manager');
 const { buildClaudeExport } = require('../analyze');
 
+const ACTION_HEADER = 'x-claude-intercept-action';
+const EXPORT_MODES = new Set(['summary', 'api-docs', 'auth', 'full']);
+const MAX_WS_BUFFERED_BYTES = 1024 * 1024;
+
+function maxAnalysisCaptures(mode) {
+  if (mode === 'full' || mode === 'auth') return 50;
+  if (mode === 'api-docs') return 100;
+  return 500;
+}
+
 const dashboardHtml = fs.readFileSync(path.join(__dirname, 'public/index.html'), 'utf8');
 const inlineScript = dashboardHtml.match(/<script>([\s\S]*?)<\/script>/i);
 if (!inlineScript) throw new Error('Dashboard script is missing');
@@ -64,6 +74,22 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Math.min(Math.max(number, minimum), maximum);
 }
 
+function validQueryStrings(query, limits) {
+  return Object.entries(limits).every(([name, maxLength]) =>
+    query[name] === undefined ||
+    (typeof query[name] === 'string' && query[name].length <= maxLength));
+}
+
+function parseIds(value, maximum) {
+  if (typeof value !== 'string') return null;
+  const parts = value.split(',');
+  if (!parts.length || parts.length > maximum) return null;
+  const ids = parts.map(part => Number(part));
+  if (parts.some((part, index) => !/^[1-9]\d*$/.test(part) ||
+      !Number.isSafeInteger(ids[index]))) return null;
+  return [...new Set(ids)];
+}
+
 function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   uiHost = '127.0.0.1', proxyOwnerId = null }) {
   if (uiHost !== '127.0.0.1' && uiHost !== '0.0.0.0') {
@@ -105,6 +131,9 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   }
 
   const app = express();
+  // Preserve the query shape used by our validators: bracketed and repeated
+  // parameters must parse as arrays so they are rejected as non-scalar input.
+  app.set('query parser', 'extended');
   app.use((req, res, next) => {
     res.set({
       'Cache-Control': 'no-store',
@@ -113,6 +142,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
       'X-Frame-Options': 'DENY',
     });
     if (!allowedHost(req.headers.host) || !allowedOrigin(req) ||
+        (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && req.headers[ACTION_HEADER] !== '1') ||
         !canAccessDashboard(req.socket.remoteAddress, req.method, req.path, lanEnabled)) {
       return res.status(403).end();
     }
@@ -126,6 +156,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   const dashboardPort = () => httpServer.address()?.port || uiPort;
   const wss = new WebSocket.Server({
     server: httpServer,
+    maxPayload: 1024,
     verifyClient: ({ req }) => isLoopbackAddress(req.socket.remoteAddress) &&
       allowedHost(req.headers.host) && allowedOrigin(req),
   });
@@ -141,8 +172,20 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
 
   function broadcast(obj) {
     const msg = JSON.stringify(obj);
+    const messageBytes = Buffer.byteLength(msg);
     for (const ws of clients) {
-      if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (ws.bufferedAmount + messageBytes > MAX_WS_BUFFERED_BYTES) {
+        ws.terminate();
+        clients.delete(ws);
+        continue;
+      }
+      ws.send(msg, err => {
+        if (err) {
+          ws.terminate();
+          clients.delete(ws);
+        }
+      });
     }
   }
 
@@ -172,7 +215,9 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   // QR code for any URL (used for iOS cert install)
   app.get('/api/qr', async (req, res) => {
     const { url } = req.query;
-    if (!url) return res.status(400).json({ error: 'url required' });
+    if (typeof url !== 'string' || !url || url.length > 2048) {
+      return res.status(400).json({ error: 'url must be a string of at most 2048 characters' });
+    }
     try {
       const dataUrl = await QRCode.toDataURL(url, {
         width: 220,
@@ -186,7 +231,15 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   });
 
   app.get('/api/captures', (req, res) => {
+    if (!validQueryStrings(req.query, {
+      host: 256, method: 32, status: 16, contentType: 256, search: 2048,
+      hasAuth: 5, device: 256, afterId: 20, limit: 20, offset: 20,
+    })) return res.status(400).json({ error: 'Invalid capture query' });
     const { host, method, status, contentType, search, hasAuth, device, afterId, limit, offset } = req.query;
+    const parsedAfterId = afterId === undefined ? undefined : Number(afterId);
+    if (afterId !== undefined && (!Number.isSafeInteger(parsedAfterId) || parsedAfterId < 1)) {
+      return res.status(400).json({ error: 'afterId must be a positive integer' });
+    }
     const result = db.queryCaptures({
       host,
       method,
@@ -195,9 +248,10 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
       search,
       hasAuth: hasAuth === 'true',
       device,
-      afterId: afterId ? Number(afterId) : undefined,
+      afterId: parsedAfterId,
       limit: boundedInteger(limit, 100, 1, 500),
       offset: boundedInteger(offset, 0, 0, Number.MAX_SAFE_INTEGER),
+      listOnly: true,
     });
     res.json(result);
   });
@@ -207,7 +261,9 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   });
 
   app.get('/api/captures/:id', (req, res) => {
-    const capture = db.getCaptureById(Number(req.params.id));
+    const id = parseIds(req.params.id, 1)?.[0];
+    if (!id) return res.status(400).json({ error: 'Invalid capture ID' });
+    const capture = db.getCaptureById(id);
     if (!capture) return res.status(404).json({ error: 'Not found' });
     res.json(capture);
   });
@@ -220,23 +276,35 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
 
   app.delete('/api/captures/batch', (req, res) => {
     const ids = req.body?.ids;
-    if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids required' });
+    if (!Array.isArray(ids) || !ids.length || ids.length > 500 ||
+        !ids.every(id => Number.isSafeInteger(id) && id > 0)) {
+      return res.status(400).json({ error: 'ids must contain 1 to 500 positive integers' });
+    }
     db.deleteCaptures(ids);
     broadcast({ type: 'deleted', data: { ids } });
     res.json({ ok: true, deleted: ids.length });
   });
 
   app.get('/api/analyze', (req, res) => {
+    if (!validQueryStrings(req.query, { ids: 10000, host: 256, mode: 16, limit: 20 })) {
+      return res.status(400).json({ error: 'Invalid analysis query' });
+    }
     const { ids, host, mode = 'summary' } = req.query;
+    if (!EXPORT_MODES.has(mode)) return res.status(400).json({ error: 'Invalid export mode' });
+    const maximum = maxAnalysisCaptures(mode);
+    const limit = req.query.limit === undefined ? Math.min(100, maximum) : Number(req.query.limit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximum) {
+      return res.status(400).json({ error: `limit must be an integer from 1 to ${maximum}` });
+    }
     let captures;
+    const summaryOnly = mode === 'summary';
 
-    if (ids) {
-      captures = ids
-        .split(',')
-        .map((id) => db.getCaptureById(Number(id)))
-        .filter(Boolean);
+    if (ids !== undefined) {
+      const parsedIds = parseIds(ids, maximum);
+      if (!parsedIds) return res.status(400).json({ error: `Select at most ${maximum} valid capture IDs` });
+      captures = parsedIds.map(id => db.getCaptureById(id, { summaryOnly })).filter(Boolean);
     } else {
-      const q = db.queryCaptures({ host, limit: 200 });
+      const q = db.queryCaptures({ host, limit, summaryOnly });
       captures = q.rows;
     }
 

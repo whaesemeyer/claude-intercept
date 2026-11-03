@@ -80,15 +80,34 @@ test('refuses a symlinked skill target without changing the destination', t => {
   assert.ok(!fs.existsSync(skill(home, 'claude')));
 });
 
+test('refuses symlinked Codex skill ancestors before installing either skill', t => {
+  for (const ancestor of ['.agents', '.agents/skills']) {
+    const { home } = fixture(t);
+    const outside = path.join(home, `outside-${ancestor.replaceAll('/', '-')}`);
+    fs.mkdirSync(outside);
+    const linked = path.join(home, ancestor);
+    fs.mkdirSync(path.dirname(linked), { recursive: true });
+    fs.symlinkSync(outside, linked);
+    const result = install(home);
+    assert.notEqual(result.status, 0, `${ancestor} should be refused`);
+    assert.match(result.stderr, /not a regular directory/);
+    const redirectedTarget = ancestor === '.agents'
+      ? path.join(outside, 'skills/intercept/SKILL.md')
+      : path.join(outside, 'intercept/SKILL.md');
+    assert.ok(!fs.existsSync(redirectedTarget));
+    assert.ok(!fs.existsSync(skill(home, 'claude')));
+  }
+});
+
 test('full installer uses the lockfile without dependency lifecycle scripts', t => {
   const { home, tmp } = fixture(t);
-  const root = path.join(tmp, 'repo');
+  const root = path.join(tmp, "repo space ' & $HOME `false`");
   fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
   fs.mkdirSync(path.join(root, 'src'));
   for (const file of ['install.sh', 'skill.md', 'scripts/install-skills.js']) {
     fs.copyFileSync(path.join(ROOT, file), path.join(root, file));
   }
-  fs.writeFileSync(path.join(root, 'src/cli.js'), '#!/usr/bin/env node\n');
+  fs.writeFileSync(path.join(root, 'src/cli.js'), 'console.log(JSON.stringify(process.argv.slice(2)))\n');
   fs.writeFileSync(path.join(home, 'test-bin/npm'),
     '#!/bin/sh\nprintf "%s\\n" "$@" > "$HOME/npm-args"\n', { mode: 0o755 });
 
@@ -100,6 +119,13 @@ test('full installer uses the lockfile without dependency lifecycle scripts', t 
   assert.deepEqual(fs.readFileSync(path.join(home, 'npm-args'), 'utf8').trim().split('\n'),
     ['ci', '--ignore-scripts']);
   assert.ok(fs.existsSync(skill(home, 'codex')));
+  const quickStart = result.stdout.match(/  Quick start:\n    (.+ start)\n/)?.[1];
+  assert.ok(quickStart, 'installer prints a runnable quick start command');
+  const run = spawnSync('bash', ['-c', quickStart], {
+    cwd: home, encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' },
+  });
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(JSON.parse(run.stdout), ['start']);
   for (const dir of ['captures', 'certs']) {
     assert.equal(fs.statSync(path.join(root, dir)).mode & 0o777, 0o700);
   }
@@ -117,9 +143,12 @@ test('rendered CLI command works from another directory with shell metacharacter
   const result = install(home, ['--agent', 'codex'], root);
   assert.equal(result.status, 0, result.stderr);
   const text = fs.readFileSync(skill(home, 'codex'), 'utf8');
-  const command = text.split('\n').find(line => line.startsWith('node ') && line.endsWith(' status --json'));
+  const command = text.split('\n').find(line => line.includes('src/cli.js') && line.endsWith(' status --json'));
   assert.ok(command, 'skill provides runnable status command');
-  const run = spawnSync('bash', ['-c', command], { cwd: home, encoding: 'utf8' });
+  assert.ok(command.includes(process.execPath), 'skill uses the installed Node executable');
+  const run = spawnSync('bash', ['-c', command], {
+    cwd: home, encoding: 'utf8', env: { ...process.env, PATH: '/usr/bin:/bin' },
+  });
   assert.equal(run.status, 0, run.stderr);
   assert.deepEqual(JSON.parse(run.stdout), ['status', '--json']);
 });
