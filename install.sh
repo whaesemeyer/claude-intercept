@@ -47,15 +47,15 @@ if [ "$SKILLS_ONLY" = true ]; then
   exit 0
 fi
 
-# ── Install npm dependencies ──────────────────────────────────────────────────
+# ── Install exactly the reviewed dependency tree ─────────────────────────────
 echo "  → Installing dependencies…"
 cd "$SCRIPT_DIR"
 
-if npm install --silent; then
+if npm ci --ignore-scripts; then
   echo "  ✓ Dependencies installed"
 else
-  echo "  ! npm install failed, trying with verbose output:"
-  npm install
+  echo "  ✗ Dependency installation failed. Check package-lock.json and npm output." >&2
+  exit 1
 fi
 
 # ── Make CLI executable ───────────────────────────────────────────────────────
@@ -65,14 +65,23 @@ echo "  ✓ CLI ready"
 # ── Install agent skills with the real checkout path ─────────────────────────
 node "$SCRIPT_DIR/scripts/install-skills.js" "$AGENT"
 
-# ── Ensure runtime dirs exist (excluded from git) ─────────────────────────────
+# ── Ensure private runtime dirs exist (excluded from git) ─────────────────────
+if [ -L "$SCRIPT_DIR/captures" ] || [ -L "$SCRIPT_DIR/certs" ]; then
+  echo "  ✗ Refusing symlinked captures or certs directory." >&2
+  exit 1
+fi
 mkdir -p "$SCRIPT_DIR/captures" "$SCRIPT_DIR/certs"
+chmod 700 "$SCRIPT_DIR/captures" "$SCRIPT_DIR/certs"
 
 # ── Optional: link CLI to PATH ────────────────────────────────────────────────
 LINK_PATH="/usr/local/bin/claude-intercept"
-if ln -sf "$SCRIPT_DIR/src/cli.js" "$LINK_PATH" 2>/dev/null; then
-  echo "  ✓ Linked: claude-intercept available globally"
-elif sudo ln -sf "$SCRIPT_DIR/src/cli.js" "$LINK_PATH" 2>/dev/null; then
+if [ -e "$LINK_PATH" ] || [ -L "$LINK_PATH" ]; then
+  if [ -L "$LINK_PATH" ] && [ "$(readlink "$LINK_PATH")" = "$SCRIPT_DIR/src/cli.js" ]; then
+    echo "  ✓ Linked: claude-intercept available globally"
+  else
+    echo "  ! Skipped global link — $LINK_PATH already exists"
+  fi
+elif ln -s "$SCRIPT_DIR/src/cli.js" "$LINK_PATH" 2>/dev/null; then
   echo "  ✓ Linked: claude-intercept available globally"
 else
   echo "  ! Skipped global link — run with: node $SCRIPT_DIR/src/cli.js"

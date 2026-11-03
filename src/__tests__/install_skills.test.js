@@ -36,6 +36,8 @@ test('default installs discoverable skills for both agents without dependencies 
     const text = fs.readFileSync(skill(home, agent), 'utf8');
     assert.match(text, /^---\nname: intercept\ndescription: .+\n---\n/);
     assert.ok(!text.includes('{{CLI}}'));
+    assert.equal(fs.statSync(skill(home, agent)).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.dirname(skill(home, agent))).mode & 0o777, 0o700);
   }
   assert.equal(fs.readFileSync(skill(home, 'codex'), 'utf8'), fs.readFileSync(skill(home, 'claude'), 'utf8'));
 });
@@ -62,6 +64,44 @@ test('invalid or missing agent and unknown flags fail before writing skills', t 
     assert.notEqual(result.status, 0);
     assert.ok(!fs.existsSync(skill(home, 'claude')));
     assert.ok(!fs.existsSync(skill(home, 'codex')));
+  }
+});
+
+test('refuses a symlinked skill target without changing the destination', t => {
+  const { home } = fixture(t);
+  const outside = path.join(home, 'outside.txt');
+  fs.writeFileSync(outside, 'keep');
+  const target = skill(home, 'codex');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.symlinkSync(outside, target);
+  const result = install(home);
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.readFileSync(outside, 'utf8'), 'keep');
+  assert.ok(!fs.existsSync(skill(home, 'claude')));
+});
+
+test('full installer uses the lockfile without dependency lifecycle scripts', t => {
+  const { home, tmp } = fixture(t);
+  const root = path.join(tmp, 'repo');
+  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'src'));
+  for (const file of ['install.sh', 'skill.md', 'scripts/install-skills.js']) {
+    fs.copyFileSync(path.join(ROOT, file), path.join(root, file));
+  }
+  fs.writeFileSync(path.join(root, 'src/cli.js'), '#!/usr/bin/env node\n');
+  fs.writeFileSync(path.join(home, 'test-bin/npm'),
+    '#!/bin/sh\nprintf "%s\\n" "$@" > "$HOME/npm-args"\n', { mode: 0o755 });
+
+  const result = spawnSync('bash', [path.join(root, 'install.sh'), '--agent', 'codex'], {
+    env: { ...process.env, HOME: home, PATH: `${path.join(home, 'test-bin')}:${process.env.PATH}` },
+    encoding: 'utf8', timeout: 15000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(fs.readFileSync(path.join(home, 'npm-args'), 'utf8').trim().split('\n'),
+    ['ci', '--ignore-scripts']);
+  assert.ok(fs.existsSync(skill(home, 'codex')));
+  for (const dir of ['captures', 'certs']) {
+    assert.equal(fs.statSync(path.join(root, dir)).mode & 0o777, 0o700);
   }
 });
 
