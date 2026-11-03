@@ -131,6 +131,9 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   }
 
   const app = express();
+  // Preserve the query shape used by our validators: bracketed and repeated
+  // parameters must parse as arrays so they are rejected as non-scalar input.
+  app.set('query parser', 'extended');
   app.use((req, res, next) => {
     res.set({
       'Cache-Control': 'no-store',
@@ -384,7 +387,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   });
 
   // Serve SPA for all other routes
-  app.get('*', (req, res) => {
+  app.get('/{*splat}', (req, res) => {
     res.type('html').send(dashboardHtml);
   });
 
