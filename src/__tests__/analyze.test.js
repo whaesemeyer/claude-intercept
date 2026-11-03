@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildJsonExport } = require('../analyze');
+const { buildClaudeExport, buildJsonExport } = require('../analyze');
 
 const sample = [
   { id: 1, host: 'api.example.com', method: 'GET', url: 'https://api.example.com/v1/me' },
@@ -45,4 +45,28 @@ test('empty input yields a valid, parseable document', () => {
 test('default generatedAt is an ISO-8601 timestamp', () => {
   const out = buildJsonExport(sample);
   assert.strictEqual(new Date(out.meta.generatedAt).toISOString(), out.meta.generatedAt);
+});
+
+test('summary exports never include raw URLs, headers, bodies, or credentials', () => {
+  const secret = 'secret-session-token-123';
+  const captures = [{
+    host: 'api.example.com', method: 'GET', responseStatus: 200, duration: 12,
+    url: `https://api.example.com/profile?token=${secret}`,
+    requestHeaders: { authorization: `Bearer ${secret}` },
+    responseBody: `{"session":"${secret}"}`,
+  }];
+  const json = buildJsonExport(captures, { mode: 'summary', generatedAt: 'FIXED' });
+  assert.deepStrictEqual(Object.keys(json).sort(), ['meta', 'summary']);
+  assert.strictEqual(json.summary.requestsByHost[0].count, 1);
+  assert.ok(!JSON.stringify(json).includes(secret));
+  assert.ok(!JSON.stringify(json).includes('/profile'));
+
+  const markdown = buildClaudeExport(captures, 'summary');
+  assert.ok(!markdown.includes(secret));
+  assert.ok(!markdown.includes('/profile'));
+});
+
+test('empty JSON summary has a finite average response time', () => {
+  const out = buildJsonExport([], { mode: 'summary', generatedAt: 'FIXED' });
+  assert.strictEqual(out.summary.averageDurationMs, 0);
 });

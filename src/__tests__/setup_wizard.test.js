@@ -46,6 +46,26 @@ function findStep(steps, fragment) {
   return steps.find(s => (s.title || '').includes(fragment));
 }
 
+test('phone setup does not offer unreachable LAN instructions in local-only mode', () => {
+  for (const platform of ['ios', 'android']) {
+    const guide = getSetupInstructions(platform, 7777, '192.0.2.5', null, {
+      lanEnabled: false,
+    });
+    assert.strictEqual(guide.steps.length, 1);
+    assert.match(guide.steps[0].html, /start --lan/);
+    assert.ok(!guide.steps[0].qrUrl);
+  }
+});
+
+test('phone certificate URL uses the configured dashboard port in LAN mode', () => {
+  const guide = getSetupInstructions('ios', 9000, '192.0.2.5', null, {
+    lanEnabled: true,
+    uiPort: 9001,
+  });
+  const qrStep = guide.steps.find(step => step.qrUrl);
+  assert.strictEqual(qrStep.qrUrl, 'http://192.0.2.5:9001/api/cert');
+});
+
 test('linux instructions show the certutil install line only when missing', () => {
   const withCertutil = getSetupInstructions('linux', 7777, '10.0.0.1', null, {
     linuxEnv: { family: 'debian', hasCertutil: true, de: 'gnome' },

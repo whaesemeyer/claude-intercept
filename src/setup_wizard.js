@@ -217,10 +217,25 @@ function untrustCertLinux(opts = {}) {
  */
 function getSetupInstructions(platform, proxyPort = 7777, lanIp = null, tailscaleIp = null, opts = {}) {
   const ip = lanIp || '<your-mac-ip>';
-  const uiPort = 7778; // always dashboard port
+  const uiPort = opts.uiPort || 7778;
+  const lanEnabled = opts.lanEnabled !== false;
   const certUrl = `http://${ip}:${uiPort}/api/cert`;
   const localCertUrl = `http://127.0.0.1:${uiPort}/api/cert`;
   const tailscaleCertUrl = tailscaleIp ? `http://${tailscaleIp}:${uiPort}/api/cert` : null;
+
+  if (!lanEnabled && (platform === 'ios' || platform === 'android')) {
+    return {
+      platform,
+      steps: [{
+        title: 'Enable LAN access for this device',
+        html: 'The proxy and dashboard currently accept connections from this machine only. Stop Claude Intercept, then restart it with <code>claude-intercept start --lan</code> (add <code>--daemon</code> if you use background mode). Reopen this tab to continue setup.',
+      }],
+      proxyPort,
+      lanIp: ip,
+      tailscaleIp: null,
+      topWarning: null,
+    };
+  }
 
   // Tailor the Linux tab to the actual distro/desktop. Injectable for tests.
   const lenv = opts.linuxEnv || (platform === 'linux'

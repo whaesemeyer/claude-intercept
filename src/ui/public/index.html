@@ -966,13 +966,19 @@ async function installTrustCA() {
 function renderIPBar(data) {
   const bar = document.getElementById('ip-info-bar');
   let html = '';
-  if (data.lanIp && data.lanIp !== '127.0.0.1') {
+  if (!data.ui?.lanEnabled) {
+    html += `<div class="ip-chip">
+      <span class="label">Access</span>
+      <span class="value">This machine only</span>
+    </div>`;
+  }
+  if (data.ui?.lanEnabled && data.lanIp && data.lanIp !== '127.0.0.1') {
     html += `<div class="ip-chip">
       <span class="label">Wi-Fi / LAN</span>
       <span class="value">${escHtml(data.lanIp)}</span>
     </div>`;
   }
-  if (data.tailscaleIp) {
+  if (data.ui?.lanEnabled && data.tailscaleIp) {
     html += `<div class="ip-chip tailscale">
       <span class="label">Tailscale</span>
       <span class="value">${escHtml(data.tailscaleIp)}</span>

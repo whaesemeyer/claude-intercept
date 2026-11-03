@@ -2,7 +2,7 @@
 
 A lightweight MITM (man-in-the-middle) proxy for capturing and analyzing HTTP/S traffic — built for use with [Claude Code](https://claude.ai/code) and [Codex](https://developers.openai.com/codex).
 
-Capture traffic from your Mac, iPhone, Android, or any device on your network. Inspect it in a real-time dark-themed dashboard, then feed it directly to Claude for analysis: document undiscovered APIs, extract auth tokens, map request patterns, and more.
+Capture traffic from your Mac, iPhone, Android, or any device on your network. Inspect it in a real-time dark-themed dashboard, then analyze discovered APIs, authentication patterns, request patterns, and more. Keep exports containing credential values local.
 
 ![Claude Intercept dashboard — Setup & Certs tab](assets/dashboard.png)
 
@@ -116,7 +116,8 @@ claude-intercept <command> [options]
 
 | Command | Description |
 |---------|-------------|
-| `start` | Start proxy + dashboard (opens browser automatically) |
+| `start` | Start proxy + dashboard for this machine only (opens browser automatically) |
+| `start --lan` | Allow devices on your LAN to reach the proxy and dashboard |
 | `start --proxy-port 9090 --ui-port 9091 --no-open` | Custom ports, no auto-open |
 | `start --daemon` | Run detached in the background (logs to `captures/intercept.log`); `stop`/`status` then work from any shell |
 | `stop` | Stop a running instance |
@@ -130,7 +131,8 @@ claude-intercept <command> [options]
 | `export --mode summary` | High-level traffic overview |
 | `export --mode full --host api.example.com` | Full headers + bodies for one host |
 | `export --device iPhone` | Only captures from a given device (see `devices`) |
-| `export --json` | Structured JSON instead of Markdown — pipe straight into an agent |
+| `export --mode summary --json` | Aggregate JSON without captured headers, bodies, or URLs |
+| `export --mode full --json` | Raw capture JSON, including any credentials present |
 | `proxy on` | Enable system proxy on this Mac |
 | `proxy off` | Disable system proxy |
 | `proxy status` | Show current system proxy state (`--json` for machine-readable) |
@@ -175,6 +177,10 @@ node ~/claude_intercept/src/cli.js untrust
 
 ### iPhone / iPad
 
+Start with `claude-intercept start --lan` (or `start --daemon --lan`) so your
+phone can reach the proxy and dashboard. If it is already running in local-only
+mode, stop it before restarting with `--lan`.
+
 1. Install the CA certificate:
    - In the dashboard **Setup & Certs → iOS/iPadOS**, scan the QR code with your iPhone camera
    - Tap the link in Safari → install the profile in Settings
@@ -185,6 +191,9 @@ node ~/claude_intercept/src/cli.js untrust
 3. Traffic from all iPhone apps now appears in the dashboard
 
 ### Android
+
+Start with `claude-intercept start --lan` (or `start --daemon --lan`) so your
+phone can reach the proxy and dashboard.
 
 1. Configure proxy: **Settings → Wi-Fi → long-press network → Modify → Proxy: Manual**
    - Hostname: your Mac's LAN IP
@@ -229,7 +238,7 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 ```
 Then ask Claude directly:
 - *"Analyze the last 50 requests and document all API endpoints"*
-- *"Extract all auth tokens from today's captures"*
+- *"Identify which hosts use authentication without showing credential values"*
 - *"What authentication pattern is this app using?"*
 
 Claude will run the export, read the output, and give you a full analysis — no copy/paste needed.
@@ -241,7 +250,11 @@ Claude will run the export, read the output, and give you a full analysis — no
 - The CA private key is generated once on your machine and stored at `certs/ca.key`. It never leaves your machine and is excluded from git.
 - Each machine gets a unique CA — certificates from one installation cannot decrypt traffic intercepted by another.
 - All captured data is stored locally in `captures/captures.db` (SQLite), also excluded from git.
-- The dashboard binds to `0.0.0.0` so phones on your LAN can reach it — do not run this on untrusted networks.
+- The proxy and dashboard bind to `127.0.0.1` by default. `start --lan` binds
+  both to `0.0.0.0` for device setup; other devices on that network can then
+  reach the dashboard and captured traffic. Stop LAN mode when finished.
+- API docs, full, and authentication exports can contain passwords, cookies, and tokens.
+  Keep those exports local and do not paste them into an agent chat.
 
 > **This tool is for authorized testing and personal use only.** Only intercept traffic from devices and accounts you own or have explicit permission to test.
 

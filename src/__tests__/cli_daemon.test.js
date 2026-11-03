@@ -20,6 +20,13 @@ test('appends --no-open when open is false', () => {
   );
 });
 
+test('passes explicit LAN access to the detached child', () => {
+  const local = daemonChildArgs(CLI, { proxyPort: 7777, uiPort: 7778, open: false });
+  const lan = daemonChildArgs(CLI, { proxyPort: 7777, uiPort: 7778, open: false, lan: true });
+  assert.ok(!local.includes('--lan'));
+  assert.ok(lan.includes('--lan'));
+});
+
 test('never passes --daemon to the child (no fork loop)', () => {
   for (const open of [true, false]) {
     const args = daemonChildArgs(CLI, { proxyPort: 1, uiPort: 2, open });

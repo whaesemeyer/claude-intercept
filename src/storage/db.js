@@ -10,8 +10,32 @@ const DB_PATH = path.join(DB_DIR, 'captures.db');
 
 let db;
 
+function secureFile(filePath) {
+  try {
+    if (!fs.lstatSync(filePath).isFile()) {
+      throw new Error(`Capture database path is not a regular file: ${filePath}`);
+    }
+    fs.chmodSync(filePath, 0o600);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+}
+
 function init() {
-  if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+  fs.mkdirSync(DB_DIR, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(DB_DIR).isDirectory()) {
+    throw new Error(`Capture path is not a directory: ${DB_DIR}`);
+  }
+  fs.chmodSync(DB_DIR, 0o700);
+  for (const filePath of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`, `${DB_PATH}-journal`]) {
+    secureFile(filePath);
+  }
+
+  // SQLite does not expose a file-mode option. Pre-create the database with
+  // owner-only access before SQLite opens it.
+  const fd = fs.openSync(DB_PATH, 'a', 0o600);
+  fs.closeSync(fd);
+  secureFile(DB_PATH);
 
   db = new DatabaseSync(DB_PATH);
   db.exec('PRAGMA journal_mode = WAL');
@@ -47,6 +71,12 @@ function init() {
   try { db.exec("ALTER TABLE captures ADD COLUMN response_body_size INTEGER DEFAULT 0"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN request_encoding TEXT DEFAULT 'identity'"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN request_body_size INTEGER DEFAULT 0"); } catch {}
+
+  // WAL/SHM files may be created by the first schema write, after the database
+  // connection opens. Match the database's owner-only permissions.
+  for (const filePath of [`${DB_PATH}-wal`, `${DB_PATH}-shm`, `${DB_PATH}-journal`]) {
+    secureFile(filePath);
+  }
 
   return db;
 }

@@ -5,6 +5,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 const QRCode = require('qrcode');
 const db = require('../storage/db');
 const certManager = require('../proxy/cert_manager');
@@ -36,13 +37,56 @@ function getNetworkInfo() {
   return { lanIp: lanIp || '127.0.0.1', tailscaleIp };
 }
 
-function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null }) {
+function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null, uiHost = '127.0.0.1' }) {
+  if (uiHost !== '127.0.0.1' && uiHost !== '0.0.0.0') {
+    throw new Error('Dashboard host must be 127.0.0.1 or 0.0.0.0');
+  }
+  const lanEnabled = uiHost === '0.0.0.0';
+
+  // A browser page can reach localhost even when the dashboard only listens
+  // there. Restrict Host to IP literals/localhost to prevent DNS rebinding,
+  // and require browser requests to come from this dashboard's own origin.
+  function allowedHost(authority) {
+    if (typeof authority !== 'string' || /[\/?#@]/.test(authority)) return false;
+    try {
+      const parsed = new URL(`http://${authority}`);
+      if (parsed.host.toLowerCase() !== authority.toLowerCase()) return false;
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+      return hostname === 'localhost' || hostname === '127.0.0.1' ||
+        (lanEnabled && net.isIP(hostname) !== 0);
+    } catch {
+      return false;
+    }
+  }
+
+  function allowedOrigin(req) {
+    const origin = req.headers.origin;
+    if (!origin) return true; // CLI clients do not send Origin.
+    try {
+      const parsed = new URL(origin);
+      return parsed.protocol === 'http:' &&
+        parsed.host.toLowerCase() === req.headers.host.toLowerCase();
+    } catch {
+      return false;
+    }
+  }
+
   const app = express();
+  app.use((req, res, next) => {
+    if (!allowedHost(req.headers.host) || !allowedOrigin(req)) {
+      return res.status(403).end();
+    }
+    next();
+  });
   app.use(express.json());
   app.use(express.static(path.join(__dirname, 'public')));
 
   const httpServer = http.createServer(app);
-  const wss = new WebSocket.Server({ server: httpServer });
+  const dashboardPort = () => httpServer.address()?.port || uiPort;
+  const wss = new WebSocket.Server({
+    server: httpServer,
+    verifyClient: ({ req }) => allowedHost(req.headers.host) && allowedOrigin(req),
+  });
 
   const clients = new Set();
   wss.on('connection', (ws) => {
@@ -64,6 +108,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
 
   app.get('/api/status', (req, res) => {
     const { lanIp, tailscaleIp } = getNetworkInfo();
+    const port = dashboardPort();
     const platform = os.platform();
     let de = null;
     if (platform === 'linux') {
@@ -71,13 +116,13 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
     }
     res.json({
       proxy: { port: proxyPort, running: true },
-      ui: { port: uiPort },
+      ui: { port, host: uiHost, lanEnabled },
       platform,
       de,
       lanIp,
       tailscaleIp,
-      certUrl: `http://${lanIp}:${uiPort}/api/cert`,
-      tailscaleCertUrl: tailscaleIp ? `http://${tailscaleIp}:${uiPort}/api/cert` : null,
+      certUrl: `http://${lanEnabled ? lanIp : '127.0.0.1'}:${port}/api/cert`,
+      tailscaleCertUrl: lanEnabled && tailscaleIp ? `http://${tailscaleIp}:${port}/api/cert` : null,
       stats: db.getStats(),
     });
   });
@@ -169,7 +214,9 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
   app.get('/api/setup/:platform', (req, res) => {
     const { getSetupInstructions } = require('../setup_wizard');
     const { lanIp, tailscaleIp } = getNetworkInfo();
-    res.json(getSetupInstructions(req.params.platform, proxyPort, lanIp, tailscaleIp));
+    res.json(getSetupInstructions(req.params.platform, proxyPort, lanIp, tailscaleIp, {
+      uiPort: dashboardPort(), lanEnabled,
+    }));
   });
 
   // System proxy toggle (local machine only — localhost access)
@@ -234,14 +281,21 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
 
   function listen() {
     return new Promise((resolve, reject) => {
-      httpServer.listen(uiPort, '0.0.0.0', (err) => {
-        if (err) return reject(err);
-        resolve(uiPort);
+      httpServer.once('error', reject);
+      httpServer.listen(uiPort, uiHost, () => {
+        httpServer.off('error', reject);
+        resolve(httpServer.address().port);
       });
     });
   }
 
-  return { broadcast, listen, app };
+  function close() {
+    return new Promise((resolve, reject) => {
+      httpServer.close(err => err ? reject(err) : resolve());
+    });
+  }
+
+  return { broadcast, listen, close, app, httpServer };
 }
 
 module.exports = { createUIServer };

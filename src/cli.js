@@ -12,7 +12,7 @@ const PID_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.pid');
 const LOG_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.log');
 
 // ── Shared startup ────────────────────────────────────────────────────────────
-async function startIntercept({ proxyPort, uiPort, open: autoOpen }) {
+async function startIntercept({ proxyPort, uiPort, open: autoOpen, lan = false }) {
   // Check if already running
   if (fs.existsSync(PID_FILE)) {
     try {
@@ -39,11 +39,12 @@ async function startIntercept({ proxyPort, uiPort, open: autoOpen }) {
 
   // Init proxy first so we can pass the instance to the UI server
   const ProxyServer = require('./proxy/index');
-  const proxy = new ProxyServer({ port: proxyPort, db, broadcast: () => {} }); // broadcast patched below
+  const listenHost = lan ? '0.0.0.0' : '127.0.0.1';
+  const proxy = new ProxyServer({ port: proxyPort, listenHost, db, broadcast: () => {} }); // broadcast patched below
 
   // Init UI + WebSocket
   const { createUIServer } = require('./ui/server');
-  const { broadcast, listen: listenUI } = createUIServer({ uiPort, proxyPort, proxyInstance: proxy });
+  const { broadcast, listen: listenUI } = createUIServer({ uiPort, proxyPort, proxyInstance: proxy, uiHost: listenHost });
 
   // Patch broadcast into proxy now that we have it
   proxy.broadcast = broadcast;
@@ -53,16 +54,16 @@ async function startIntercept({ proxyPort, uiPort, open: autoOpen }) {
 
   // Write PID
   fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
-  fs.writeFileSync(PID_FILE, String(process.pid));
-
-  const localIp = getLocalIP();
+  fs.writeFileSync(PID_FILE, String(process.pid), { mode: 0o600 });
+  fs.chmodSync(PID_FILE, 0o600);
 
   console.log(chalk.green('  ✓ Proxy running'));
   console.log(`    ${chalk.bold('HTTP/HTTPS proxy:')} ${chalk.cyan(`127.0.0.1:${proxyPort}`)}`);
-  console.log(`    ${chalk.bold('LAN access:')}       ${chalk.cyan(`${localIp}:${proxyPort}`)}`);
+  if (lan) console.log(`    ${chalk.bold('LAN access:')}       ${chalk.cyan(`${getLocalIP()}:${proxyPort}`)}`);
   console.log('');
   console.log(chalk.green('  ✓ Dashboard running'));
   console.log(`    ${chalk.cyan(`http://127.0.0.1:${uiPort}`)}`);
+  if (lan) console.log(`    ${chalk.bold('LAN dashboard:')} ${chalk.cyan(`http://${getLocalIP()}:${uiPort}`)}`);
   console.log('');
   console.log(chalk.dim('  CA Certificate: ' + certManager.getCACertPath()));
   console.log(chalk.dim('  Ctrl+C to stop\n'));
@@ -109,15 +110,16 @@ function isRunning() {
 
 // Pure: argv for the detached child. Deliberately omits --daemon so the child
 // runs the normal foreground path (and writes its own PID) — no fork loop.
-function daemonChildArgs(cliPath, { proxyPort, uiPort, open }) {
+function daemonChildArgs(cliPath, { proxyPort, uiPort, open, lan = false }) {
   const args = [cliPath, 'start', '--proxy-port', String(proxyPort), '--ui-port', String(uiPort)];
+  if (lan) args.push('--lan');
   if (!open) args.push('--no-open');
   return args;
 }
 
 // Spawn a detached background instance, then wait for it to write the PID file
 // so we can confirm a clean start before the parent exits.
-function startDaemon({ proxyPort, uiPort, open }) {
+function startDaemon({ proxyPort, uiPort, open, lan = false }) {
   const existing = isRunning();
   if (existing) {
     console.log(chalk.yellow(`[intercept] Already running (PID ${existing})`));
@@ -126,12 +128,21 @@ function startDaemon({ proxyPort, uiPort, open }) {
     return;
   }
 
-  fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
-  const logFd = fs.openSync(LOG_FILE, 'a');
+  const captureDir = path.dirname(LOG_FILE);
+  fs.mkdirSync(captureDir, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(captureDir).isDirectory()) {
+    throw new Error(`Capture path is not a directory: ${captureDir}`);
+  }
+  fs.chmodSync(captureDir, 0o700);
+  if (fs.existsSync(LOG_FILE) && !fs.lstatSync(LOG_FILE).isFile()) {
+    throw new Error(`Log path is not a regular file: ${LOG_FILE}`);
+  }
+  const logFd = fs.openSync(LOG_FILE, 'a', 0o600);
+  fs.chmodSync(LOG_FILE, 0o600);
   const { spawn } = require('child_process');
   const child = spawn(
     process.execPath,
-    daemonChildArgs(__filename, { proxyPort, uiPort, open }),
+    daemonChildArgs(__filename, { proxyPort, uiPort, open, lan }),
     { detached: true, stdio: ['ignore', logFd, logFd] }
   );
   child.unref();
@@ -144,6 +155,7 @@ function startDaemon({ proxyPort, uiPort, open }) {
       console.log(chalk.green(`  ✓ Claude Intercept started (PID ${pid})`));
       console.log(`    ${chalk.bold('Proxy:')}     ${chalk.cyan(`http://127.0.0.1:${proxyPort}`)}`);
       console.log(`    ${chalk.bold('Dashboard:')} ${chalk.cyan(`http://127.0.0.1:${uiPort}`)}`);
+      if (lan) console.log(`    ${chalk.bold('LAN access:')} ${chalk.cyan(`${getLocalIP()}:${proxyPort} (proxy), :${uiPort} (dashboard)`)}`);
       console.log(chalk.dim(`    Logs:  ${LOG_FILE}`));
       console.log(chalk.dim(`    Stop:  claude-intercept stop\n`));
       return;
@@ -180,6 +192,7 @@ program
   .description('Start the proxy and dashboard')
   .option('-p, --proxy-port <port>', 'Proxy port', '7777')
   .option('-u, --ui-port <port>', 'Dashboard port', '7778')
+  .option('--lan', 'Allow other devices on the local network to access the proxy and dashboard')
   .option('--no-open', 'Do not open the dashboard automatically')
   .option('-d, --daemon', 'Run detached in the background; logs to captures/intercept.log')
   .action(async (opts) => {
@@ -188,6 +201,7 @@ program
         proxyPort: parseInt(opts.proxyPort, 10),
         uiPort: parseInt(opts.uiPort, 10),
         open: opts.open !== false,
+        lan: !!opts.lan,
       };
       if (opts.daemon) {
         startDaemon(cfg);

@@ -34,8 +34,9 @@ function collectBody(stream) {
 }
 
 class ProxyServer {
-  constructor({ port = 8080, db, broadcast }) {
+  constructor({ port = 8080, listenHost = '127.0.0.1', db, broadcast }) {
     this.port = port;
+    this.listenHost = listenHost;
     this.db = db;
     this.broadcast = broadcast; // fn(eventObj) → WebSocket broadcast
     this.paused = false;
@@ -171,12 +172,11 @@ class ProxyServer {
 
     // Force HTTP/1.1 — WebSocket-over-HTTP/2 (RFC 8441) is a separate path
     // most servers don't enable, and the Upgrade header semantics only work
-    // over h1.
+    // over h1. Keep Node's default certificate and hostname verification.
     const upstream = tls.connect({
       host,
       port,
-      servername: host,
-      rejectUnauthorized: false,
+      servername: net.isIP(host) ? undefined : host,
       ALPNProtocols: ['http/1.1'],
     });
 
@@ -230,13 +230,14 @@ class ProxyServer {
     const clientIp = rawIp.replace(/^::ffff:/, '');
     const clientLabel = deriveDeviceLabel(clientIp, req.headers['user-agent']);
 
+    // HTTPS must validate the real upstream, even though this proxy presents
+    // its own certificate to the client on the inbound connection.
     const options = {
       hostname: host,
       port,
       path,
       method: req.method,
       headers: { ...req.headers, host },
-      rejectUnauthorized: false,
     };
 
     const lib = isHttps ? https : http;
@@ -345,7 +346,7 @@ class ProxyServer {
 
   listen() {
     return new Promise((resolve, reject) => {
-      this.server.listen(this.port, '0.0.0.0', (err) => {
+      this.server.listen(this.port, this.listenHost, (err) => {
         if (err) return reject(err);
         resolve(this.port);
       });
