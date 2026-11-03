@@ -129,3 +129,69 @@ test('capture queries bound invalid limits and empty deletes are harmless', t =>
   `);
   assert.deepEqual(result, { length: 100, firstId: 120, emptyDelete: 0, count: 120 });
 });
+
+test('capture database stops growing at its limit and resumes after clearing', t => {
+  const { modulePath } = fixture(t, 'storage/db.js');
+  const result = runFixture(modulePath, `
+    const storage = require(process.argv[1]);
+    storage.init({ maxCaptureBytes: 1024 * 1024 });
+    const capture = {
+      timestamp: Date.now(), method: 'GET', url: 'https://example.com/',
+      host: 'example.com', path: '/', responseStatus: 200,
+      responseBody: 'x'.repeat(200 * 1024),
+    };
+    let inserted = 0;
+    let errorCode = null;
+    for (let i = 0; i < 20; i++) {
+      try { storage.insertCapture(capture); inserted++; }
+      catch (err) { errorCode = err.code; break; }
+    }
+    const full = storage.getStats();
+    const { spawnSync } = require('node:child_process');
+    const cleared = spawnSync(process.execPath,
+      ['-e', 'const storage = require(process.argv[1]); storage.init(); storage.clearCaptures();', process.argv[1]],
+      { encoding: 'utf8' });
+    if (cleared.status !== 0) throw new Error(cleared.stderr);
+    storage.insertCapture(capture);
+    const resumed = storage.getStats();
+    console.log(JSON.stringify({ inserted, errorCode, full, resumed }));
+  `);
+  assert.ok(result.inserted > 0 && result.inserted < 20);
+  assert.equal(result.errorCode, 'CAPTURE_QUOTA_EXCEEDED');
+  assert.equal(result.full.total, result.inserted);
+  assert.equal(result.full.storageLimitReached, true);
+  assert.ok(result.full.storageBytes <= result.full.storageLimitBytes);
+  assert.equal(result.resumed.total, 1);
+  assert.equal(result.resumed.storageLimitReached, false);
+});
+
+test('summary queries avoid loading captured secrets', t => {
+  const { modulePath } = fixture(t, 'storage/db.js');
+  const result = runFixture(modulePath, `
+    const storage = require(process.argv[1]);
+    storage.init();
+    const id = storage.insertCapture({
+      timestamp: Date.now(), method: 'POST', url: 'https://example.com/login',
+      host: 'example.com', path: '/login', responseStatus: 200,
+      requestHeaders: { authorization: 'Bearer secret-token' },
+      requestBody: 'secret-token', responseBody: 'secret-token',
+      duration: 7,
+    });
+    console.log(JSON.stringify({
+      full: storage.getCaptureById(id),
+      one: storage.getCaptureById(id, { summaryOnly: true }),
+      many: storage.queryCaptures({ summaryOnly: true }).rows,
+      listing: storage.queryCaptures({ listOnly: true }).rows,
+    }));
+  `);
+  assert.match(JSON.stringify(result.full), /secret-token/);
+  assert.deepEqual(result.one, {
+    id: result.full.id, host: 'example.com', method: 'POST',
+    responseStatus: 200, duration: 7,
+  });
+  assert.deepEqual(result.many, [result.one]);
+  assert.doesNotMatch(JSON.stringify(result.many), /secret-token/);
+  assert.deepEqual(result.listing.map(row => row.id), [result.full.id]);
+  assert.doesNotMatch(JSON.stringify(result.listing), /secret-token/);
+  assert.equal(result.listing[0].requestBody, undefined);
+});

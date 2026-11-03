@@ -76,3 +76,90 @@ test('empty JSON summary has a finite average response time', () => {
   const out = buildJsonExport([], { mode: 'summary', generatedAt: 'FIXED' });
   assert.strictEqual(out.summary.averageDurationMs, 0);
 });
+
+test('API documentation includes endpoint and body structure without captured values', () => {
+  const secret = 'secret-session-token-123';
+  const out = buildClaudeExport([{
+    host: 'api.example.com', method: 'POST', path: '/login',
+    url: `https://api.example.com/login?token=${secret}`,
+    responseStatus: 200, duration: 3,
+    contentType: 'application/json',
+    requestHeaders: { authorization: `Bearer ${secret}`, cookie: `session=${secret}` },
+    requestBody: JSON.stringify({ credentials: { password: secret }, remember: true }),
+    responseBody: JSON.stringify({ accessToken: secret, profile: { id: 42 } }),
+  }], 'api-docs');
+  assert.match(out, /### POST \/login/);
+  assert.match(out, /"password": "string"/);
+  assert.match(out, /authorization: \[value omitted\]/);
+  assert.doesNotMatch(out, /secret-session-token-123/);
+});
+
+test('API documentation JSON contains structured endpoints without raw capture values', () => {
+  const secret = 'secret-session-token-123';
+  const out = buildJsonExport([{
+    host: 'api.example.com', method: 'POST', path: '/login',
+    url: `https://api.example.com/login?token=${secret}`,
+    responseStatus: 200, duration: 3, contentType: 'application/json',
+    requestHeaders: { authorization: `Bearer ${secret}` },
+    requestBody: JSON.stringify({ password: secret }),
+    responseBody: JSON.stringify({ accessToken: secret }),
+  }], { mode: 'api-docs', generatedAt: 'FIXED' });
+  assert.deepStrictEqual(Object.keys(out).sort(), ['endpoints', 'meta']);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(out.endpoints[0].requestBodyStructure)), { password: 'string' });
+  assert.deepStrictEqual(out.endpoints[0].requestHeaderNames, ['authorization']);
+  assert.ok(!JSON.stringify(out).includes(secret));
+});
+
+test('API documentation does not expose a custom Content-Type value', () => {
+  const capture = {
+    host: 'api.example.com', method: 'GET', path: '/thing',
+    contentType: 'application/private-token-abc123',
+  };
+  const markdown = buildClaudeExport([capture], 'api-docs');
+  const json = buildJsonExport([capture], { mode: 'api-docs' });
+  assert.doesNotMatch(markdown, /private-token-abc123/);
+  assert.doesNotMatch(JSON.stringify(json), /private-token-abc123/);
+  assert.equal(json.endpoints[0].contentType, '[other]');
+});
+
+test('auth JSON includes credential findings without unrelated capture bodies', () => {
+  const out = buildJsonExport([{
+    host: 'api.example.com', method: 'GET', path: '/',
+    url: 'https://api.example.com/',
+    requestHeaders: { authorization: 'Bearer credential-value-123' },
+    responseBody: '{"ordinaryField":"private-unrelated-data"}',
+  }], { mode: 'auth', generatedAt: 'FIXED' });
+  assert.deepStrictEqual(Object.keys(out).sort(), ['findings', 'meta']);
+  assert.match(out.findings, /credential-value-123/);
+  assert.doesNotMatch(JSON.stringify(out), /private-unrelated-data/);
+});
+
+test('unknown JSON mode falls back to aggregate summary', () => {
+  const out = buildJsonExport([{
+    host: 'api.example.com', method: 'GET', responseStatus: 200,
+    requestHeaders: { authorization: 'Bearer credential-value-123' },
+  }], { mode: 'sumary', generatedAt: 'FIXED' });
+  assert.deepStrictEqual(Object.keys(out).sort(), ['meta', 'summary']);
+  assert.strictEqual(out.meta.mode, 'summary');
+  assert.doesNotMatch(JSON.stringify(out), /credential-value-123/);
+});
+
+test('API documentation treats prototype property names as ordinary hosts', () => {
+  const key = 'GET /audit';
+  try {
+    const out = buildClaudeExport([{
+      host: '__proto__', method: 'GET', path: '/audit',
+      responseStatus: 200, duration: 1,
+    }, {
+      host: 'constructor', method: 'GET', path: '/audit',
+      responseStatus: 200, duration: 1,
+    }], 'api-docs');
+    assert.match(out, /## Host: __proto__/);
+    assert.match(out, /## Host: constructor/);
+    assert.strictEqual(Object.prototype[key], undefined);
+    assert.strictEqual(Object[key], undefined);
+  } finally {
+    delete Object.prototype[key];
+    delete Object[key];
+  }
+});

@@ -13,7 +13,6 @@ const { randomBytes, timingSafeEqual } = require('node:crypto');
 const PROJECT_ROOT = path.join(__dirname, '..');
 const PID_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.pid');
 const LOG_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.log');
-const MAX_EXPORT_LIMIT = 5000;
 const EXPORT_MODES = new Set(['api-docs', 'auth', 'summary', 'full']);
 let activeInstance = null;
 
@@ -166,15 +165,41 @@ function parsePort(value, label = 'Port') {
   return port;
 }
 
-function parseExportOptions({ mode, limit }) {
-  const count = Number(limit);
+function parseExportOptions({ mode, limit, offset = '0', json = false }) {
   if (!EXPORT_MODES.has(mode)) {
     throw new RangeError(`Unknown export mode: ${mode}`);
   }
-  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_EXPORT_LIMIT) {
-    throw new RangeError(`Export limit must be an integer from 1 to ${MAX_EXPORT_LIMIT}`);
+  const maximum = mode === 'summary' ? 5000
+    : mode === 'api-docs' ? 100
+      : mode === 'full' && json ? 25 : 50;
+  const count = limit === undefined ? Math.min(100, maximum) : Number(limit);
+  const start = Number(offset);
+  if (!Number.isSafeInteger(count) || count < 1 || count > maximum) {
+    throw new RangeError(`Export limit must be an integer from 1 to ${maximum} for ${mode}${json ? ' JSON' : ''} mode`);
   }
-  return { mode, limit: count };
+  if (!Number.isSafeInteger(start) || start < 0) {
+    throw new RangeError('Export offset must be a nonnegative integer');
+  }
+  return { mode, limit: count, offset: start };
+}
+
+function dashboardOpenCommand(platform, url) {
+  if (platform === 'darwin') return { command: 'open', args: [url] };
+  if (platform === 'win32') {
+    return { command: 'cmd.exe', args: ['/d', '/s', '/c', `start "" "${url}"`] };
+  }
+  return { command: 'xdg-open', args: [url] };
+}
+
+function openDashboard(url, spawn = require('node:child_process').spawn) {
+  const { command, args } = dashboardOpenCommand(process.platform, url);
+  try {
+    const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', err => console.warn(`[intercept] Could not open dashboard: ${err.message}`));
+    child.unref();
+  } catch (err) {
+    console.warn(`[intercept] Could not open dashboard: ${err.message}`);
+  }
 }
 
 // ── Shared startup ────────────────────────────────────────────────────────────
@@ -234,8 +259,7 @@ async function startIntercept({ proxyPort, uiPort, open: autoOpen, lan = false }
   console.log(chalk.dim('  Ctrl+C to stop\n'));
 
   if (autoOpen) {
-    const opener = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
-    require('child_process').spawn(opener, [`http://127.0.0.1:${uiPort}`], { detached: true, stdio: 'ignore' });
+    openDashboard(`http://127.0.0.1:${uiPort}`);
   }
 
   // Graceful shutdown
@@ -482,7 +506,8 @@ program
   .option('--mode <mode>', 'Export mode: api-docs | auth | summary | full', 'summary')
   .option('--host <host>', 'Filter by host')
   .option('--device <label>', 'Filter by device label (see "devices")')
-  .option('--limit <n>', 'Max captures', '100')
+  .option('--limit <n>', 'Max captures (mode-specific limit)')
+  .option('--offset <n>', 'Skip newest matching captures', '0')
   .option('--json', 'Emit structured JSON instead of Markdown (for agents/scripts)')
   .action((opts) => {
     let exportOptions;
@@ -500,6 +525,8 @@ program
       host: opts.host,
       device: opts.device,
       limit: exportOptions.limit,
+      offset: exportOptions.offset,
+      summaryOnly: exportOptions.mode === 'summary',
     });
     if (opts.json) {
       // Always emit valid JSON (even when empty) so callers can parse unconditionally.
@@ -608,7 +635,8 @@ proxyCmd
 
     if (result.error) {
       console.error(chalk.red(`  ✗ ${result.error}`));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     if (result.activated) {
@@ -618,6 +646,7 @@ proxyCmd
     }
     if (result.errors?.length) {
       for (const e of result.errors) console.log(chalk.yellow(`  ! ${e}`));
+      process.exitCode = 1;
     }
     if (result.message) {
       console.log(chalk.yellow(`  ! ${result.message}`));
@@ -627,7 +656,7 @@ proxyCmd
       for (const l of result.envLines) console.log(chalk.cyan(`    ${l}`));
     }
 
-    if (!result.degraded) {
+    if (!result.degraded && !result.errors?.length) {
       console.log(chalk.dim(`\n  All HTTP/HTTPS traffic from this machine will now be intercepted.`));
       console.log(chalk.dim(`  Run "proxy off" to disable Intercept-owned settings.\n`));
     }
@@ -648,12 +677,14 @@ proxyCmd
     }
     if (result.errors?.length) {
       for (const e of result.errors) console.log(chalk.yellow(`  ! ${e}`));
+      process.exitCode = 1;
     }
     if (result.message) {
       console.log(chalk.yellow(`  ! ${result.message}`));
     }
     if (result.error) {
       console.error(chalk.red(`  ✗ ${result.error}`));
+      process.exitCode = 1;
     } else {
       console.log(chalk.dim(`\n  ${result.message || 'Intercept-owned system proxy settings disabled.'}\n`));
     }
@@ -681,7 +712,8 @@ proxyCmd
       const httpIcon  = s.httpEnabled  ? chalk.green('●') : chalk.dim('○');
       const httpsIcon = s.httpsEnabled ? chalk.green('●') : chalk.dim('○');
       const dest = s.httpEnabled ? chalk.cyan(`${s.server}:${s.port}`) : chalk.dim('off');
-      const tag = s.pointsHere ? chalk.green(' ← claude-intercept') : '';
+      const tag = result.ownership?.active && s.pointsHere &&
+        s.port === result.ownership.port ? chalk.green(' ← claude-intercept') : '';
       console.log(`  ${s.service}`);
       console.log(`    HTTP  ${httpIcon}  HTTPS ${httpsIcon}  →  ${dest}${tag}`);
     }
@@ -702,7 +734,7 @@ if (require.main === module) {
   }
 }
 
-module.exports = { daemonChildArgs, parseExportOptions, parsePort };
+module.exports = { daemonChildArgs, parseExportOptions, parsePort, dashboardOpenCommand, openDashboard };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function getLocalIP() {

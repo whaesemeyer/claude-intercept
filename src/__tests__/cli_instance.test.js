@@ -154,3 +154,12 @@ test('CA trust commands fail when unsupported or incomplete', t => {
     assert.match(succeeded.stdout, /All steps completed/);
   }
 });
+
+test('proxy off reports ownership refusal as a command failure', t => {
+  const { root, cli, env } = fixture(t);
+  fs.writeFileSync(path.join(root, 'src/system_proxy.js'),
+    "module.exports = { disable() { return { error: 'unverified owner' }; } };\n");
+  const result = run(cli, env, ['proxy', 'off']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /unverified owner/);
+});

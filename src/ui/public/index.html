@@ -65,6 +65,12 @@
   .stat-dot.offline { background: var(--delete); animation: none; }
   .stat-dot.live { animation: pulse 2s infinite; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+  .storage-warning {
+    padding: 9px 16px; background: rgba(248,81,73,.14);
+    border-bottom: 1px solid rgba(248,81,73,.5); color: #f4b2ad;
+    font-size: 12px; line-height: 1.4; flex-shrink: 0;
+  }
+  .storage-warning[hidden] { display: none; }
 
   /* ── Pause/record button ── */
   .rec-btn {
@@ -450,6 +456,10 @@
   <button data-tab="setup">Setup &amp; Certs</button>
 </nav>
 
+<div id="storage-warning" class="storage-warning" role="alert" hidden>
+  Capture storage limit reached. Traffic still forwards, but new requests are not being saved. Clear old captures or increase the storage limit to resume recording.
+</div>
+
 <main>
   <!-- ── Traffic panel ── -->
   <div class="panel active" id="tab-traffic">
@@ -761,6 +771,18 @@ let TAILSCALE_IP = null;
 let PLATFORM = null;
 let DE = null;
 let capturePaused = false;
+const ACTION_HEADERS = { 'X-Claude-Intercept-Action': '1' };
+
+function updateStorageWarning(reached) {
+  document.getElementById('storage-warning').hidden = !reached;
+}
+
+async function refreshStorageStatus() {
+  try {
+    const res = await fetch('/api/status');
+    if (res.ok) updateStats((await res.json()).stats);
+  } catch {}
+}
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
@@ -780,16 +802,21 @@ function connectWS() {
     const msg = JSON.parse(e.data);
     if (msg.type === 'capture') {
       addCapture(msg.data);
+      updateStorageWarning(false);
     } else if (msg.type === 'stats') {
       updateStats(msg.data);
+    } else if (msg.type === 'captureStorageFull') {
+      updateStorageWarning(true);
     } else if (msg.type === 'cleared') {
       captures = []; selectedId = null; selectedCaptures.clear(); inspectorCapture = null;
       renderList(); showInspectorEmpty(); updateSelCount(); applyFilters();
+      refreshStorageStatus();
     } else if (msg.type === 'deleted') {
       const ids = new Set(msg.data.ids);
       captures = captures.filter(c => !ids.has(c.id));
       ids.forEach(id => selectedCaptures.delete(id));
       renderList(); updateSelCount(); applyFilters();
+      refreshStorageStatus();
     } else if (msg.type === 'capturePaused') {
       capturePaused = true; updatePauseBtn();
     } else if (msg.type === 'captureResumed') {
@@ -941,7 +968,7 @@ async function installTrustCA() {
   btn.textContent = 'Installing… (watch for a password prompt)';
   out.innerHTML = '';
   try {
-    const res = await fetch('/api/trust/linux', { method: 'POST' });
+    const res = await fetch('/api/trust/linux', { method: 'POST', headers: ACTION_HEADERS });
     const data = await res.json();
     if (data.error && !data.steps) {
       out.innerHTML = `<div style="color:#f47067">${escHtml(data.error)}</div>`;
@@ -996,6 +1023,7 @@ function updateStats(s) {
   if (!s) return;
   document.getElementById('stat-total').textContent = `${s.total} req`;
   document.getElementById('stat-hosts').textContent = `${s.hosts} hosts`;
+  if (typeof s.storageLimitReached === 'boolean') updateStorageWarning(s.storageLimitReached);
 }
 
 // ── Captures ──────────────────────────────────────────────────────────────────
@@ -1179,7 +1207,7 @@ async function deleteSelected() {
   if (!confirm(`Delete ${ids.length} selected capture${ids.length > 1 ? 's' : ''}?`)) return;
   await fetch('/api/captures/batch', {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { ...ACTION_HEADERS, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ids }),
   });
   // Remove from local array and clear selection
@@ -1204,7 +1232,7 @@ function exportSelected() {
 // ── Pause / Resume ────────────────────────────────────────────────────────────
 async function togglePause() {
   const endpoint = capturePaused ? '/api/capture/resume' : '/api/capture/pause';
-  await fetch(endpoint, { method: 'POST' });
+  await fetch(endpoint, { method: 'POST', headers: ACTION_HEADERS });
   // State updated via WebSocket broadcast
 }
 
@@ -1333,7 +1361,16 @@ function selectExportMode(el) {
 async function generateExport() {
   const ids = [...selectedCaptures].join(',');
   const mode = exportMode;
-  const url = ids ? `/api/analyze?ids=${ids}&mode=${mode}` : `/api/analyze?mode=${mode}&limit=100`;
+  const maximum = mode === 'full' || mode === 'auth' ? 50 : mode === 'api-docs' ? 100 : 500;
+  if (selectedCaptures.size > maximum) {
+    generatedExportMode = null;
+    document.getElementById('export-output').textContent =
+      `Select at most ${maximum} captures for this export mode.`;
+    document.getElementById('export-info').textContent = '';
+    return;
+  }
+  const limit = Math.min(100, maximum);
+  const url = ids ? `/api/analyze?ids=${ids}&mode=${mode}` : `/api/analyze?mode=${mode}&limit=${limit}`;
   try {
     const res = await fetch(url);
     const data = await res.json();
@@ -1341,13 +1378,14 @@ async function generateExport() {
     document.getElementById('export-output').textContent = data.error ? 'Error: ' + data.error : data.output;
     document.getElementById('export-info').textContent = data.count ? `${data.count} captures` : '';
   } catch (e) {
+    generatedExportMode = null;
     document.getElementById('export-output').textContent = 'Failed: ' + e.message;
   }
 }
 
 async function copyExport() {
   const text = document.getElementById('export-output').textContent;
-  if (text && text !== 'Click "Generate Export" to build output…') {
+  if (generatedExportMode && text) {
     if (generatedExportMode !== 'summary' &&
         !confirm('This export may contain live credentials. Copy it to the clipboard?')) return;
     await navigator.clipboard.writeText(text);
@@ -1358,7 +1396,7 @@ async function copyExport() {
 
 async function clearCaptures() {
   if (!confirm('Clear all captures?')) return;
-  await fetch('/api/captures', { method: 'DELETE' });
+  await fetch('/api/captures', { method: 'DELETE', headers: ACTION_HEADERS });
 }
 
 // ── Setup — system proxy toggle ───────────────────────────────────────────────
@@ -1408,7 +1446,8 @@ async function setLocalProxy(enable) {
   const btnOff = document.getElementById('btn-proxy-off');
   btnOn.disabled = btnOff.disabled = true;
   try {
-    const res = await fetch(enable ? '/api/proxy/on' : '/api/proxy/off', { method: 'POST' });
+    const res = await fetch(enable ? '/api/proxy/on' : '/api/proxy/off',
+      { method: 'POST', headers: ACTION_HEADERS });
     if (!res.ok) {
       const data = await res.json();
       throw new Error(data.error || 'System proxy change was refused');

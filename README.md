@@ -128,13 +128,16 @@ claude-intercept <command> [options]
 | `clear` | Delete all captured traffic |
 | `devices` | List device labels seen in captured traffic (`--json` for parity) |
 | `cert` | Print path to the CA certificate |
-| `export --mode api-docs` | Generate API documentation locally; may include captured secrets |
+| `export --mode api-docs` | Generate endpoint documentation with header names and JSON body structure; URLs and field names may still be sensitive |
 | `export --mode auth` | Extract Bearer tokens, cookies, API keys |
 | `export` or `export --mode summary` | High-level traffic overview (default; excludes raw URLs, headers, and bodies) |
 | `export --mode full --host api.example.com` | Full headers + bodies for one host |
 | `export --device iPhone` | Only captures from a given device (see `devices`) |
 | `export --mode summary --json` | Aggregate JSON without captured headers, bodies, or URLs |
+| `export --mode api-docs --json` | Structured endpoint JSON with header names and body structure, without header or body values |
+| `export --mode auth --json` | JSON-wrapped credential findings, without unrelated raw captures |
 | `export --mode full --json` | Raw capture JSON, including any credentials present |
+| `export --offset 100 --limit 100` | Page through older matching captures; detailed modes cap each page at 25–100 captures |
 | `proxy on` | Enable system proxy for a running Intercept instance on macOS or GNOME/KDE; refuses an unrelated active proxy |
 | `proxy off` | Disable only Intercept-owned system proxy settings |
 | `proxy status` | Show current system proxy state (`--json` for machine-readable) |
@@ -264,6 +267,13 @@ credential values in chat.
 - The CA private key is generated once on your machine and stored at `certs/ca.key`. It never leaves your machine and is excluded from git.
 - Each machine gets a unique CA — certificates from one installation cannot decrypt traffic intercepted by another.
 - All captured data is stored locally in `captures/captures.db` (SQLite), also excluded from git. The database and private keys are owner-only files, but the database is not encrypted; other processes running as your user can read it.
+- A new capture database has a 512 MiB page limit. When it fills, the proxy
+  keeps forwarding but stops saving new captures; the dashboard shows a
+  warning. Clear or delete captures to reuse database pages; this does not
+  necessarily shrink the file on disk. Set
+  `CLAUDE_INTERCEPT_MAX_CAPTURE_MB` to an integer from 16 to 8192 before
+  starting to choose a different limit. Existing larger databases are not
+  truncated.
 - The proxy and dashboard bind to `127.0.0.1` by default. `start --lan` lets
   other devices use the proxy and download the public CA certificate. The
   dashboard, capture API, and admin routes remain accessible only from this
@@ -274,8 +284,10 @@ credential values in chat.
 - The dashboard has no login. Any local account that can connect to this
   machine's loopback interface can inspect captures and use dashboard controls;
   run it on a trusted single-user workstation.
-- API docs, full, and authentication exports can contain passwords, cookies, and tokens.
-  Keep those exports local and do not paste them into an agent chat.
+- API documentation omits captured header and body values, but URL paths,
+  hosts, and field names can still be sensitive. Authentication and full
+  exports include credential values. Review exports locally before sharing;
+  keep authentication and full exports out of agent chats.
 
 > **This tool is for authorized testing and personal use only.** Only intercept traffic from devices and accounts you own or have explicit permission to test.
 
