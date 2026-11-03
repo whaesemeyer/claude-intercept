@@ -119,3 +119,12 @@ test('shutdown leaves a PID file replaced by another instance untouched', async 
   await waitFor(() => !fs.existsSync(record.controlPath));
   assert.deepEqual(JSON.parse(fs.readFileSync(pidFile, 'utf8')), replacement);
 });
+
+test('proxy off reports ownership refusal as a command failure', t => {
+  const { root, cli, env } = fixture(t);
+  fs.writeFileSync(path.join(root, 'src/system_proxy.js'),
+    "module.exports = { disable() { return { error: 'unverified owner' }; } };\n");
+  const result = run(cli, env, ['proxy', 'off']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /unverified owner/);
+});

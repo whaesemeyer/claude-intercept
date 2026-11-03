@@ -621,7 +621,8 @@ proxyCmd
 
     if (result.error) {
       console.error(chalk.red(`  ✗ ${result.error}`));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     if (result.activated) {
@@ -631,6 +632,7 @@ proxyCmd
     }
     if (result.errors?.length) {
       for (const e of result.errors) console.log(chalk.yellow(`  ! ${e}`));
+      process.exitCode = 1;
     }
     if (result.message) {
       console.log(chalk.yellow(`  ! ${result.message}`));
@@ -640,7 +642,7 @@ proxyCmd
       for (const l of result.envLines) console.log(chalk.cyan(`    ${l}`));
     }
 
-    if (!result.degraded) {
+    if (!result.degraded && !result.errors?.length) {
       console.log(chalk.dim(`\n  All HTTP/HTTPS traffic from this machine will now be intercepted.`));
       console.log(chalk.dim(`  Run "proxy off" to disable Intercept-owned settings.\n`));
     }
@@ -661,12 +663,14 @@ proxyCmd
     }
     if (result.errors?.length) {
       for (const e of result.errors) console.log(chalk.yellow(`  ! ${e}`));
+      process.exitCode = 1;
     }
     if (result.message) {
       console.log(chalk.yellow(`  ! ${result.message}`));
     }
     if (result.error) {
       console.error(chalk.red(`  ✗ ${result.error}`));
+      process.exitCode = 1;
     } else {
       console.log(chalk.dim(`\n  ${result.message || 'Intercept-owned system proxy settings disabled.'}\n`));
     }
@@ -694,7 +698,8 @@ proxyCmd
       const httpIcon  = s.httpEnabled  ? chalk.green('●') : chalk.dim('○');
       const httpsIcon = s.httpsEnabled ? chalk.green('●') : chalk.dim('○');
       const dest = s.httpEnabled ? chalk.cyan(`${s.server}:${s.port}`) : chalk.dim('off');
-      const tag = s.pointsHere ? chalk.green(' ← claude-intercept') : '';
+      const tag = result.ownership?.active && s.pointsHere &&
+        s.port === result.ownership.port ? chalk.green(' ← claude-intercept') : '';
       console.log(`  ${s.service}`);
       console.log(`    HTTP  ${httpIcon}  HTTPS ${httpsIcon}  →  ${dest}${tag}`);
     }
