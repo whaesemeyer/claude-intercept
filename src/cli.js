@@ -165,7 +165,7 @@ function parsePort(value, label = 'Port') {
   return port;
 }
 
-function parseExportOptions({ mode, limit, offset = '0', json = false }) {
+function parseExportOptions({ mode, limit, offset = '0', afterId, json = false }) {
   if (!EXPORT_MODES.has(mode)) {
     throw new RangeError(`Unknown export mode: ${mode}`);
   }
@@ -180,7 +180,15 @@ function parseExportOptions({ mode, limit, offset = '0', json = false }) {
   if (!Number.isSafeInteger(start) || start < 0) {
     throw new RangeError('Export offset must be a nonnegative integer');
   }
-  return { mode, limit: count, offset: start };
+  let baseline;
+  if (afterId !== undefined) {
+    if (!/^(0|[1-9]\d*)$/.test(String(afterId)) ||
+        !Number.isSafeInteger(Number(afterId))) {
+      throw new RangeError('Export after-id must be a nonnegative integer');
+    }
+    baseline = Number(afterId);
+  }
+  return { mode, limit: count, offset: start, ...(baseline === undefined ? {} : { afterId: baseline }) };
 }
 
 function dashboardOpenCommand(platform, url) {
@@ -502,12 +510,13 @@ program
 
 program
   .command('export')
-  .description('Export captures to stdout for Claude analysis')
+  .description('Export captures to stdout for local analysis')
   .option('--mode <mode>', 'Export mode: api-docs | auth | summary | full', 'summary')
   .option('--host <host>', 'Filter by host')
   .option('--device <label>', 'Filter by device label (see "devices")')
   .option('--limit <n>', 'Max captures (mode-specific limit)')
   .option('--offset <n>', 'Skip newest matching captures', '0')
+  .option('--after-id <id>', 'Only captures recorded after this capture ID')
   .option('--json', 'Emit structured JSON instead of Markdown (for agents/scripts)')
   .action((opts) => {
     let exportOptions;
@@ -526,6 +535,7 @@ program
       device: opts.device,
       limit: exportOptions.limit,
       offset: exportOptions.offset,
+      afterId: exportOptions.afterId,
       summaryOnly: exportOptions.mode === 'summary',
     });
     if (opts.json) {
@@ -571,7 +581,8 @@ program
   .description('Install & trust the CA on Linux (system store + Chrome/Chromium + Firefox)')
   .action(() => {
     if (os.platform() !== 'linux') {
-      console.log(chalk.yellow('  Automated trust is Linux-only. On macOS use the Setup tab; on Windows import the cert manually.'));
+      console.error(chalk.yellow('  Automated trust is Linux-only. On macOS use the Setup tab; on Windows import the cert manually.'));
+      process.exitCode = 1;
       return;
     }
     const certManager = require('./proxy/cert_manager');
@@ -581,6 +592,7 @@ program
     console.log(chalk.dim('  You may be prompted for your sudo password.\n'));
     const result = trustCertLinux({ prefer: 'sudo' });
     printTrustSteps(result);
+    if (!result.ok) process.exitCode = 1;
   });
 
 program
@@ -588,7 +600,8 @@ program
   .description('Remove the Claude Intercept CA from Linux trust stores')
   .action(() => {
     if (os.platform() !== 'linux') {
-      console.log(chalk.yellow('  Automated untrust is Linux-only.'));
+      console.error(chalk.yellow('  Automated untrust is Linux-only.'));
+      process.exitCode = 1;
       return;
     }
     const { untrustCertLinux } = require('./setup_wizard');
@@ -596,6 +609,7 @@ program
     console.log(chalk.dim('  You may be prompted for your sudo password.\n'));
     const result = untrustCertLinux({ prefer: 'sudo' });
     printTrustSteps(result);
+    if (!result.ok) process.exitCode = 1;
   });
 
 const proxyCmd = program
