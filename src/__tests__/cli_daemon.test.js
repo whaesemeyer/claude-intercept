@@ -45,11 +45,21 @@ test('requiring the CLI module does not parse argv or exit', () => {
 
 test('export rejects invalid modes and unbounded limits before opening captures', () => {
   assert.deepStrictEqual(parseExportOptions({ mode: 'summary', limit: '50' }),
-    { mode: 'summary', limit: 50 });
+    { mode: 'summary', limit: 50, offset: 0 });
   for (const limit of ['-1', '0', 'NaN', '5001', '10junk']) {
     assert.throws(() => parseExportOptions({ mode: 'summary', limit }), /Export limit/);
   }
   assert.throws(() => parseExportOptions({ mode: 'summry', limit: '50' }), /Unknown export mode/);
+  assert.deepStrictEqual(parseExportOptions({ mode: 'full', json: true, offset: '250' }),
+    { mode: 'full', limit: 25, offset: 250 });
+  assert.deepStrictEqual(parseExportOptions({ mode: 'api-docs' }),
+    { mode: 'api-docs', limit: 100, offset: 0 });
+  assert.throws(() => parseExportOptions({ mode: 'full', json: true, limit: '26' }), /Export limit/);
+  assert.throws(() => parseExportOptions({ mode: 'api-docs', limit: '101' }), /Export limit/);
+  assert.throws(() => parseExportOptions({ mode: 'auth', limit: '51' }), /Export limit/);
+  for (const offset of ['-1', '1.5', 'NaN', '3junk']) {
+    assert.throws(() => parseExportOptions({ mode: 'summary', offset }), /Export offset/);
+  }
 });
 
 test('ports require exact integers in the valid TCP range', () => {

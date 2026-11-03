@@ -173,6 +173,8 @@ function queryCaptures({
   afterId,
   limit = 100,
   offset = 0,
+  summaryOnly = false,
+  listOnly = false,
 } = {}) {
   const requestedLimit = Number(limit);
   const requestedOffset = Number(offset);
@@ -234,19 +236,23 @@ function queryCaptures({
 
   const rows = db
     .prepare(
-      `SELECT * FROM captures ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`
+      `SELECT ${summaryOnly ? 'id, host, method, response_status, duration_ms'
+        : listOnly ? 'id, timestamp, method, url, host, path, response_status, duration_ms, client_label'
+          : '*'}
+       FROM captures ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`
     )
     .all({ ...params, $limit: boundedLimit, $offset: boundedOffset });
 
   return {
     total: Number(total),
-    rows: rows.map(parseRow),
+    rows: rows.map(summaryOnly ? parseSummaryRow : listOnly ? parseListRow : parseRow),
   };
 }
 
-function getCaptureById(id) {
-  const row = db.prepare('SELECT * FROM captures WHERE id = $id').get({ $id: id });
-  return row ? parseRow(row) : null;
+function getCaptureById(id, { summaryOnly = false } = {}) {
+  const columns = summaryOnly ? 'id, host, method, response_status, duration_ms' : '*';
+  const row = db.prepare(`SELECT ${columns} FROM captures WHERE id = $id`).get({ $id: id });
+  return row ? (summaryOnly ? parseSummaryRow(row) : parseRow(row)) : null;
 }
 
 function clearCaptures() {
@@ -305,6 +311,30 @@ function parseRow(row) {
     contentType: row.content_type,
     duration: Number(row.duration_ms || 0),
     clientIp: row.client_ip || '',
+    clientLabel: row.client_label || '',
+  };
+}
+
+function parseSummaryRow(row) {
+  return {
+    id: Number(row.id),
+    host: row.host,
+    method: row.method,
+    responseStatus: Number(row.response_status || 0),
+    duration: Number(row.duration_ms || 0),
+  };
+}
+
+function parseListRow(row) {
+  return {
+    id: Number(row.id),
+    timestamp: Number(row.timestamp),
+    method: row.method,
+    url: row.url,
+    host: row.host,
+    path: row.path,
+    responseStatus: Number(row.response_status || 0),
+    duration: Number(row.duration_ms || 0),
     clientLabel: row.client_label || '',
   };
 }

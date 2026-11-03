@@ -12,7 +12,6 @@ const { randomBytes, timingSafeEqual } = require('node:crypto');
 const PROJECT_ROOT = path.join(__dirname, '..');
 const PID_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.pid');
 const LOG_FILE = path.join(PROJECT_ROOT, 'captures', 'intercept.log');
-const MAX_EXPORT_LIMIT = 5000;
 const EXPORT_MODES = new Set(['api-docs', 'auth', 'summary', 'full']);
 let activeInstance = null;
 
@@ -165,15 +164,22 @@ function parsePort(value, label = 'Port') {
   return port;
 }
 
-function parseExportOptions({ mode, limit }) {
-  const count = Number(limit);
+function parseExportOptions({ mode, limit, offset = '0', json = false }) {
   if (!EXPORT_MODES.has(mode)) {
     throw new RangeError(`Unknown export mode: ${mode}`);
   }
-  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_EXPORT_LIMIT) {
-    throw new RangeError(`Export limit must be an integer from 1 to ${MAX_EXPORT_LIMIT}`);
+  const maximum = mode === 'summary' ? 5000
+    : mode === 'api-docs' ? 100
+      : mode === 'full' && json ? 25 : 50;
+  const count = limit === undefined ? Math.min(100, maximum) : Number(limit);
+  const start = Number(offset);
+  if (!Number.isSafeInteger(count) || count < 1 || count > maximum) {
+    throw new RangeError(`Export limit must be an integer from 1 to ${maximum} for ${mode}${json ? ' JSON' : ''} mode`);
   }
-  return { mode, limit: count };
+  if (!Number.isSafeInteger(start) || start < 0) {
+    throw new RangeError('Export offset must be a nonnegative integer');
+  }
+  return { mode, limit: count, offset: start };
 }
 
 function dashboardOpenCommand(platform, url) {
@@ -499,7 +505,8 @@ program
   .option('--mode <mode>', 'Export mode: api-docs | auth | summary | full', 'summary')
   .option('--host <host>', 'Filter by host')
   .option('--device <label>', 'Filter by device label (see "devices")')
-  .option('--limit <n>', 'Max captures', '100')
+  .option('--limit <n>', 'Max captures (mode-specific limit)')
+  .option('--offset <n>', 'Skip newest matching captures', '0')
   .option('--json', 'Emit structured JSON instead of Markdown (for agents/scripts)')
   .action((opts) => {
     let exportOptions;
@@ -517,6 +524,8 @@ program
       host: opts.host,
       device: opts.device,
       limit: exportOptions.limit,
+      offset: exportOptions.offset,
+      summaryOnly: exportOptions.mode === 'summary',
     });
     if (opts.json) {
       // Always emit valid JSON (even when empty) so callers can parse unconditionally.

@@ -164,3 +164,34 @@ test('capture database stops growing at its limit and resumes after clearing', t
   assert.equal(result.resumed.total, 1);
   assert.equal(result.resumed.storageLimitReached, false);
 });
+
+test('summary queries avoid loading captured secrets', t => {
+  const { modulePath } = fixture(t, 'storage/db.js');
+  const result = runFixture(modulePath, `
+    const storage = require(process.argv[1]);
+    storage.init();
+    const id = storage.insertCapture({
+      timestamp: Date.now(), method: 'POST', url: 'https://example.com/login',
+      host: 'example.com', path: '/login', responseStatus: 200,
+      requestHeaders: { authorization: 'Bearer secret-token' },
+      requestBody: 'secret-token', responseBody: 'secret-token',
+      duration: 7,
+    });
+    console.log(JSON.stringify({
+      full: storage.getCaptureById(id),
+      one: storage.getCaptureById(id, { summaryOnly: true }),
+      many: storage.queryCaptures({ summaryOnly: true }).rows,
+      listing: storage.queryCaptures({ listOnly: true }).rows,
+    }));
+  `);
+  assert.match(JSON.stringify(result.full), /secret-token/);
+  assert.deepEqual(result.one, {
+    id: result.full.id, host: 'example.com', method: 'POST',
+    responseStatus: 200, duration: 7,
+  });
+  assert.deepEqual(result.many, [result.one]);
+  assert.doesNotMatch(JSON.stringify(result.many), /secret-token/);
+  assert.deepEqual(result.listing.map(row => row.id), [result.full.id]);
+  assert.doesNotMatch(JSON.stringify(result.listing), /secret-token/);
+  assert.equal(result.listing[0].requestBody, undefined);
+});
