@@ -452,7 +452,10 @@ test('WebSocket upgrade strips proxy credentials and pins CONNECT authority', as
   client.destroy = () => {};
   let wsCapture;
   const proxy = new ProxyServer({
-    db: { insertCapture(capture) { wsCapture = capture; return 1; } },
+    db: {
+      insertCapture(capture) { wsCapture = capture; return 1; },
+      finalizeWsCapture() {},
+    },
     broadcast: () => {},
   });
   proxy._handleWebSocketUpgrade({
@@ -477,4 +480,210 @@ test('WebSocket upgrade strips proxy credentials and pins CONNECT authority', as
   client.emit('close');
   assert.equal(wsCapture.requestHeaders['proxy-authorization'], undefined);
   assert.equal(wsCapture.requestHeaders['proxy-connection'], undefined);
+});
+
+test('WebSocket upgrade keeps an absolute 15-second deadline until complete 101 headers', t => {
+  let upstream;
+  t.mock.method(tls, 'connect', () => upstream);
+
+  const deadlines = [];
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  t.mock.method(global, 'setTimeout', (callback, ms, ...args) => {
+    if (ms !== 15_000) return realSetTimeout(callback, ms, ...args);
+    const timer = { callback, ms, cleared: false };
+    deadlines.push(timer);
+    return timer;
+  });
+  t.mock.method(global, 'clearTimeout', timer => {
+    if (deadlines.includes(timer)) timer.cleared = true;
+    else realClearTimeout(timer);
+  });
+
+  const openUpgrade = () => {
+    upstream = new EventEmitter();
+    const client = new EventEmitter();
+    let upstreamDestroyed = false;
+    let clientDestroyed = false;
+    upstream.setTimeout = upstream.setNoDelay = upstream.write = () => {};
+    upstream.pipe = target => target;
+    upstream.destroy = () => { upstreamDestroyed = true; };
+    client.remoteAddress = '127.0.0.1';
+    client.pause = client.setNoDelay = () => {};
+    client.pipe = target => target;
+    client.destroy = () => { clientDestroyed = true; };
+    const proxy = new ProxyServer({
+      db: { insertCapture() { return 1; }, finalizeWsCapture() {} },
+      broadcast: () => {},
+    });
+    proxy._handleWebSocketUpgrade({
+      method: 'GET', url: '/socket',
+      headers: { host: 'example.com', connection: 'Upgrade', upgrade: 'websocket' },
+      socket: { _interceptHost: 'example.com', _interceptPort: 443 },
+    }, client, Buffer.alloc(0));
+    const deadline = deadlines.at(-1);
+    assert.equal(deadline.ms, 15_000);
+    upstream.emit('secureConnect');
+    return {
+      upstream, client, deadline,
+      destroyed: () => upstreamDestroyed && clientDestroyed,
+    };
+  };
+
+  const trickled = openUpgrade();
+  for (const part of ['HTTP/1.1 101 Switching Protocols\r\n', 'Upgrade: websocket\r\n']) {
+    trickled.upstream.emit('data', Buffer.from(part));
+    assert.equal(trickled.deadline.cleared, false);
+  }
+  trickled.deadline.callback();
+  assert.equal(trickled.destroyed(), true);
+
+  const accepted = openUpgrade();
+  accepted.upstream.emit('data', Buffer.from('HTTP/1.1 101 Switching Protocols\r\n'));
+  assert.equal(accepted.deadline.cleared, false);
+  accepted.upstream.emit('data', Buffer.from('Upgrade: websocket\r\n\r\n'));
+  assert.equal(accepted.deadline.cleared, true);
+  assert.equal(accepted.destroyed(), false);
+  accepted.client.emit('close');
+
+  const rejected = openUpgrade();
+  rejected.upstream.emit('data', Buffer.from('HTTP/1.1 403 Forbidden\r\n\r\n'));
+  assert.equal(rejected.deadline.cleared, false);
+  rejected.deadline.callback();
+  assert.equal(rejected.destroyed(), true);
+
+  const oversized = openUpgrade();
+  oversized.upstream.emit('data', Buffer.alloc(16 * 1024, 0x61));
+  assert.equal(oversized.deadline.cleared, false);
+  oversized.deadline.callback();
+  assert.equal(oversized.destroyed(), true);
+});
+
+test('WebSocket observation records a bounded prefix without replacing the tunnel', t => {
+  const upstream = new EventEmitter();
+  const client = new EventEmitter();
+  const pipes = [];
+  upstream.setTimeout = upstream.setNoDelay = upstream.write = upstream.destroy = () => {};
+  upstream.pipe = target => { pipes.push('upstream'); return target; };
+  client.remoteAddress = '127.0.0.1';
+  client.pause = client.setNoDelay = client.destroy = () => {};
+  client.pipe = target => { pipes.push('client'); return target; };
+  t.mock.method(tls, 'connect', () => upstream);
+  const frames = [];
+  const events = [];
+  let final;
+  const proxy = new ProxyServer({
+    db: {
+      insertCapture() { return 11; },
+      insertWsFrame(frame) { frames.push(frame); return frames.length; },
+      finalizeWsCapture(_id, update) { final = update; },
+    },
+    broadcast: event => events.push(event),
+  });
+  const makeFrame = payload => {
+    const data = Buffer.from(payload);
+    const header = data.length < 126
+      ? Buffer.from([0x81, data.length])
+      : Buffer.from([0x81, 126, data.length >> 8, data.length & 0xff]);
+    return Buffer.concat([header, data]);
+  };
+  proxy._handleWebSocketUpgrade({
+    method: 'GET', url: '/socket',
+    headers: { host: 'example.com', connection: 'Upgrade', upgrade: 'websocket' },
+    socket: { _interceptHost: 'example.com', _interceptPort: 443 },
+  }, client, Buffer.alloc(0));
+  upstream.emit('secureConnect');
+  assert.deepEqual(pipes, ['upstream', 'client']);
+  upstream.emit('data', Buffer.concat([
+    Buffer.from('HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n'),
+    makeFrame('server message'),
+  ]));
+  client.emit('data', makeFrame('client message'));
+  upstream.emit('data', makeFrame(Buffer.alloc(40 * 1024, 0x61)));
+  upstream.emit('data', makeFrame('not recorded'));
+  client.emit('close');
+  assert.deepEqual(frames.map(frame => frame.payload), ['server message', 'client message']);
+  assert.match(final.responseBody, /capture limited/);
+  assert.equal(final.responseStatus, 101);
+  assert.equal(events.filter(event => event.type === 'wsFrame').length, 2);
+  assert.equal(events.find(event => event.type === 'wsFrame').data.payload, undefined);
+});
+
+test('rejected WebSocket upgrades forward without interpreting HTTP bodies as frames', t => {
+  const upstream = new EventEmitter();
+  const client = new EventEmitter();
+  const pipes = [];
+  upstream.setTimeout = upstream.setNoDelay = upstream.write = upstream.destroy = () => {};
+  upstream.pipe = target => { pipes.push('upstream'); return target; };
+  client.remoteAddress = '127.0.0.1';
+  client.pause = client.setNoDelay = client.destroy = () => {};
+  client.pipe = target => { pipes.push('client'); return target; };
+  t.mock.method(tls, 'connect', () => upstream);
+  let inserted = 0;
+  let final;
+  const proxy = new ProxyServer({
+    db: {
+      insertCapture() { return 1; },
+      insertWsFrame() { inserted++; return inserted; },
+      finalizeWsCapture(_id, update) { final = update; },
+    },
+    broadcast: () => {},
+  });
+  proxy._handleWebSocketUpgrade({
+    method: 'GET', url: '/socket',
+    headers: { host: 'example.com', connection: 'Upgrade', upgrade: 'websocket' },
+    socket: { _interceptHost: 'example.com', _interceptPort: 443 },
+  }, client, Buffer.alloc(0));
+  upstream.emit('secureConnect');
+  upstream.emit('data', Buffer.concat([
+    Buffer.from('HTTP/1.1 403 Forbidden\r\nContent-Length: 5\r\n\r\n'),
+    Buffer.from([0x81, 0x03, 0x62, 0x61, 0x64]),
+  ]));
+  client.emit('close');
+  assert.deepEqual(pipes, ['upstream', 'client']);
+  assert.equal(inserted, 0);
+  assert.equal(final.responseStatus, 403);
+});
+
+test('WebSocket capture stops storage attempts after quota failure while the tunnel stays open', t => {
+  const upstream = new EventEmitter();
+  const client = new EventEmitter();
+  const pipes = [];
+  upstream.setTimeout = upstream.setNoDelay = upstream.write = upstream.destroy = () => {};
+  upstream.pipe = target => { pipes.push('upstream'); return target; };
+  client.remoteAddress = '127.0.0.1';
+  client.pause = client.setNoDelay = client.destroy = () => {};
+  client.pipe = target => { pipes.push('client'); return target; };
+  t.mock.method(tls, 'connect', () => upstream);
+  let attempts = 0;
+  let final;
+  const events = [];
+  const proxy = new ProxyServer({
+    db: {
+      insertCapture() { return 1; },
+      insertWsFrame() {
+        attempts++;
+        const err = new Error('Capture database limit reached');
+        err.code = 'CAPTURE_QUOTA_EXCEEDED';
+        throw err;
+      },
+      finalizeWsCapture(_id, update) { final = update; },
+      getStats() { return { storageLimitBytes: 1024, storageBytes: 1024 }; },
+    },
+    broadcast: event => events.push(event),
+  });
+  proxy._handleWebSocketUpgrade({
+    method: 'GET', url: '/socket',
+    headers: { host: 'example.com', connection: 'Upgrade', upgrade: 'websocket' },
+    socket: { _interceptHost: 'example.com', _interceptPort: 443 },
+  }, client, Buffer.alloc(0));
+  upstream.emit('secureConnect');
+  upstream.emit('data', Buffer.from('HTTP/1.1 101 Switching Protocols\r\n\r\n'));
+  upstream.emit('data', Buffer.from([0x81, 0x01, 0x61, 0x81, 0x01, 0x62]));
+  client.emit('data', Buffer.from([0x81, 0x01, 0x63]));
+  assert.equal(attempts, 1);
+  assert.deepEqual(pipes, ['upstream', 'client']);
+  assert.equal(events.filter(event => event.type === 'captureStorageFull').length, 1);
+  client.emit('close');
+  assert.match(final.responseBody, /capture limited/);
 });

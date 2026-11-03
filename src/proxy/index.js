@@ -9,6 +9,10 @@ const os = require('node:os');
 const { URL } = require('url');
 const certManager = require('./cert_manager');
 const { tryDecodeBody, MAX_BODY } = require('./body');
+const { WsFrameParser, OPCODES, parseHandshakeResponse } = require('./ws_frame');
+const WS_MAX_FRAMES = 200;
+const WS_MAX_PAYLOAD_CHARS = 2048;
+const WS_MAX_HANDSHAKE_BYTES = 16 * 1024;
 const MAX_ACTIVE_CAPTURE_BYTES = 32 * MAX_BODY;
 const RESPONSE_HEADER_TIMEOUT_MS = 120_000;
 
@@ -391,14 +395,13 @@ class ProxyServer {
     });
   }
 
-  // ── WebSocket upgrade (wss://) — transparent tunnel + connection log ──────
+  // ── WebSocket upgrade (wss://) — transparent tunnel + bounded frame log ──
   //
   // Cert-pinned single-page apps (Spotify web, Discord) require a working
   // WebSocket upgrade or they hang at the loading state. Node's http.Server
   // emits 'upgrade' instead of 'request' when a client sends Upgrade: websocket.
-  // We can't decrypt frames here without a full RFC 6455 parser; for now we
-  // forward bytes verbatim and log a single capture row per connection so the
-  // dashboard shows the WS happened.
+  // Observe a bounded prefix of frames in each direction while pipe() keeps
+  // forwarding bytes with backpressure. Observation never alters the tunnel.
 
   _handleWebSocketUpgrade(req, clientSocket, head) {
     const tlsSocket = req.socket;
@@ -415,11 +418,8 @@ class ProxyServer {
     const clientIp = rawIp.replace(/^::ffff:/, '');
     const clientLabel = deriveDeviceLabel(clientIp, req.headers['user-agent']);
 
-    let logged = false;
-    const finalize = (status) => {
-      if (logged || this.paused) return;
-      logged = true;
-      const duration = Date.now() - startMs;
+    let connectionId = null;
+    if (!this.paused) {
       const capture = {
         timestamp: startMs,
         method: 'WS',
@@ -430,23 +430,88 @@ class ProxyServer {
         requestBody: '',
         requestEncoding: 'identity',
         requestBodySize: 0,
-        responseStatus: status,
+        responseStatus: 0,
         responseHeaders: {},
-        responseBody: `[WebSocket — duration ${duration}ms]`,
+        responseBody: '[WebSocket — connecting]',
         responseEncoding: 'identity',
         responseBodySize: 0,
         contentType: 'websocket',
-        duration,
+        duration: 0,
         clientIp,
         clientLabel,
       };
       try {
-        const id = this.db.insertCapture(capture);
+        connectionId = this.db.insertCapture(capture);
         this._captureQuotaReported = false;
-        capture.id = id;
+        capture.id = connectionId;
         this.broadcast({ type: 'capture', data: this._serializeCapture(capture) });
       } catch (err) {
         this._captureError(err, 'WS');
+      }
+    }
+
+    let frameCount = 0;
+    let droppedFrames = 0;
+    let pingPong = 0;
+    let captureLimited = false;
+    let frameStorageFailed = false;
+    let negotiatedStatus = 0;
+    const recordFrame = (direction, msg) => {
+      if (this.paused || connectionId === null || frameStorageFailed) return;
+      if (msg.isControl && (msg.opcode === OPCODES.PING || msg.opcode === OPCODES.PONG)) {
+        pingPong++;
+        return;
+      }
+      if (frameCount >= WS_MAX_FRAMES) { droppedFrames++; captureLimited = true; return; }
+      let payload = msg.isText ? msg.payload.toString('utf8')
+        : msg.opcode === OPCODES.BINARY || msg.compressed
+          ? msg.payload.toString('base64') : msg.payload.toString('hex');
+      const truncated = msg.truncated || payload.length > WS_MAX_PAYLOAD_CHARS;
+      if (payload.length > WS_MAX_PAYLOAD_CHARS) payload = payload.slice(0, WS_MAX_PAYLOAD_CHARS);
+      const frame = {
+        connectionId, timestamp: Date.now(), direction, opcode: msg.opcode,
+        isText: msg.isText, payload, payloadSize: msg.payload.length,
+        truncated, compressed: Boolean(msg.compressed),
+      };
+      try {
+        frame.id = this.db.insertWsFrame(frame);
+        if (frame.id === null) {
+          droppedFrames++;
+          captureLimited = true;
+          frameStorageFailed = true;
+          return;
+        }
+      } catch (err) {
+        captureLimited = true;
+        frameStorageFailed = true;
+        this._captureError(err, 'WS frame');
+        return;
+      }
+      frameCount++;
+      try { this.broadcast({ type: 'wsFrame', data: { connectionId, id: frame.id } }); }
+      catch {}
+    };
+
+    let logged = false;
+    const finalize = (status) => {
+      if (logged) return;
+      logged = true;
+      if (connectionId === null) return;
+      const duration = Date.now() - startMs;
+      const finalStatus = negotiatedStatus || status;
+      const summary = `[WebSocket — ${frameCount} frame${frameCount === 1 ? '' : 's'}, ` +
+        `${pingPong} ping/pong, ${droppedFrames} dropped, ${duration}ms` +
+        `${captureLimited ? ', capture limited' : ''}]`;
+      try {
+        this.db.finalizeWsCapture(connectionId, {
+          duration, responseBody: summary, responseStatus: finalStatus,
+        });
+        this.broadcast({ type: 'wsClosed', data: {
+          id: connectionId, duration, frameCount, responseStatus: finalStatus,
+          responseBody: summary,
+        } });
+      } catch (err) {
+        this._captureError(err, 'WS finalize');
       }
     };
 
@@ -460,8 +525,8 @@ class ProxyServer {
       servername: net.isIP(host) ? undefined : host,
       ALPNProtocols: ['http/1.1'],
     });
-    // A socket inactivity timeout is not a reliable deadline for every phase
-    // of DNS, TCP, and TLS setup. Bound the whole upstream handshake.
+    // Bound DNS, TCP, TLS, and the HTTP Upgrade response together. A socket
+    // inactivity timeout alone can be defeated by trickled response headers.
     const handshakeTimer = setTimeout(() => cleanup(0), 15_000);
 
     let closed = false;
@@ -479,12 +544,11 @@ class ProxyServer {
 
     upstream.on('error', () => cleanup(0));
     clientSocket.on('error', () => cleanup(0));
-    clientSocket.on('close', () => cleanup(101));
-    upstream.on('close', () => cleanup(101));
+    clientSocket.on('close', () => cleanup(0));
+    upstream.on('close', () => cleanup(0));
 
     upstream.once('secureConnect', () => {
       if (closed) return;
-      clearTimeout(handshakeTimer);
       upstream.setTimeout(300_000, () => cleanup(0));
       try { upstream.setNoDelay?.(true); } catch {}
 
@@ -498,6 +562,60 @@ class ProxyServer {
       } catch {
         return cleanup(0);
       }
+
+      let handshakeBuf = Buffer.alloc(0);
+      let handshakeDone = false;
+      let clientFrames = null;
+      let serverFrames = null;
+
+      upstream.on('data', chunk => {
+        try {
+          let data = chunk;
+          if (!handshakeDone) {
+            const previousBytes = handshakeBuf.length;
+            const room = WS_MAX_HANDSHAKE_BYTES - previousBytes;
+            const prefix = chunk.subarray(0, room);
+            handshakeBuf = Buffer.concat([handshakeBuf, prefix]);
+            const end = handshakeBuf.indexOf('\r\n\r\n');
+            if (end === -1) {
+              if (chunk.length > room || handshakeBuf.length === WS_MAX_HANDSHAKE_BYTES) {
+                captureLimited = true;
+                handshakeDone = true;
+                handshakeBuf = Buffer.alloc(0);
+              }
+              return;
+            }
+            handshakeDone = true;
+            const response = parseHandshakeResponse(handshakeBuf.subarray(0, end));
+            negotiatedStatus = response.status;
+            handshakeBuf = Buffer.alloc(0);
+            if (response.status !== 101) return;
+            clearTimeout(handshakeTimer);
+            clientFrames = new WsFrameParser({ permessageDeflate: response.permessageDeflate });
+            serverFrames = new WsFrameParser({ permessageDeflate: response.permessageDeflate });
+            data = chunk.subarray(end + 4 - previousBytes);
+          }
+          if (serverFrames) {
+            for (const msg of serverFrames.push(data)) recordFrame('server→client', msg);
+            if (serverFrames.stopped) captureLimited = true;
+          }
+        } catch (err) {
+          captureLimited = true;
+          serverFrames = null;
+          console.error('[proxy] WS frame parse error (server):', err.message);
+        }
+      });
+      clientSocket.on('data', chunk => {
+        if (!clientFrames) return; // Early client bytes are forwarded, not retained.
+        try {
+          for (const msg of clientFrames.push(chunk)) recordFrame('client→server', msg);
+          if (clientFrames.stopped) captureLimited = true;
+        } catch (err) {
+          captureLimited = true;
+          clientFrames = null;
+          console.error('[proxy] WS frame parse error (client):', err.message);
+        }
+      });
 
       // Keep both write sides open until cleanup, while pipe() provides
       // backpressure when either peer reads slowly. Its default end-on-end

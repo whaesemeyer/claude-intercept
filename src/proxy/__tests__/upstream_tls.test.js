@@ -39,7 +39,11 @@ test('HTTPS and WebSocket forwarding reject an untrusted upstream certificate', 
 
   try {
     const port = origin.address().port;
-    const db = { insertCapture: () => 1 };
+    let finalCapture;
+    const db = {
+      insertCapture: () => 1,
+      finalizeWsCapture(_id, update) { finalCapture = update; },
+    };
     const proxy = new ProxyServer({ db, broadcast: () => {} });
     const req = Readable.from([]);
     req.method = 'GET';
@@ -79,6 +83,7 @@ test('HTTPS and WebSocket forwarding reject an untrusted upstream certificate', 
       clearTimeout(timeout);
     }
     assert.equal(requests, 0, 'the WebSocket upgrade must not reach the untrusted origin');
+    assert.equal(finalCapture.responseStatus, 0);
   } finally {
     await new Promise(resolve => origin.close(resolve));
   }
