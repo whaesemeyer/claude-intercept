@@ -55,108 +55,131 @@ function trustCertLinux(opts = {}) {
   const steps = [];
   const record = (name, ok, detail) => { steps.push({ name, ok, detail }); return ok; };
 
-  // 1. Locate CA, copy to a temp path.
+  // 1. Locate CA, copy to a private temp directory before elevated tools read it.
   let tmpCa = caPath;
+  let tmpDir = null;
+  const cleanupTmpCa = () => {
+    try {
+      if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true });
+      else if (tmpCa !== caPath) fs.unlinkSync(tmpCa);
+    } catch {}
+  };
   try {
     if (!fs.existsSync(caPath)) {
       record('Locate CA certificate', false, `Not found at ${caPath} — start the proxy once to generate it`);
       return { steps, ok: false };
     }
-    tmpCa = opts.tmpCa || path.join(os.tmpdir(), `claude-intercept-ca-${Date.now()}.crt`);
+    if (opts.tmpCa) tmpCa = opts.tmpCa;
+    else {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-intercept-ca-'));
+      fs.chmodSync(tmpDir, 0o700);
+      tmpCa = path.join(tmpDir, 'ca.crt');
+    }
     fs.copyFileSync(caPath, tmpCa);
+    fs.chmodSync(tmpCa, 0o600);
     record('Locate CA certificate', true, caPath);
   } catch (e) {
+    cleanupTmpCa();
     record('Locate CA certificate', false, e.message);
     return { steps, ok: false };
   }
 
-  // 2. System trust store (elevated).
-  let sysArgv = null;
-  if (env.family === 'debian') {
-    sysArgv = ['/bin/sh', '-c',
-      `cp ${tmpCa} /usr/local/share/ca-certificates/claude-intercept.crt && update-ca-certificates`];
-  } else if (env.family === 'rhel') {
-    sysArgv = ['/bin/sh', '-c',
-      `cp ${tmpCa} /etc/pki/ca-trust/source/anchors/claude-intercept.crt && update-ca-trust extract`];
-  } else if (env.family === 'arch') {
-    sysArgv = ['/bin/sh', '-c', `trust anchor --store ${tmpCa}`];
-  }
-  if (sysArgv) {
-    const r = runAdmin(sysArgv);
-    record('Install in system trust store', !!r.ok,
-      r.ok ? `${env.family} store updated` : (r.error || 'elevation failed'));
-  } else {
-    record('Install in system trust store', false,
-      `Unknown distro family — copy ${tmpCa} into your CA anchors manually`);
-  }
-
-  // 3. certutil bootstrap (no sudo for the nssdb itself; install needs sudo).
-  if (!env.hasCertutil) {
-    let installArgv = null;
-    if (env.family === 'debian') installArgv = ['/bin/sh', '-c', 'apt-get install -y libnss3-tools'];
-    else if (env.family === 'rhel') installArgv = ['/bin/sh', '-c', 'dnf install -y nss-tools'];
-    else if (env.family === 'arch') installArgv = ['/bin/sh', '-c', 'pacman -S --noconfirm nss'];
-    if (installArgv) {
-      const r = runAdmin(installArgv);
-      record('Install certutil (libnss3-tools)', !!r.ok,
-        r.ok ? 'installed' : (r.error || 'elevation failed'));
-    } else {
-      record('Install certutil (libnss3-tools)', false, 'Install the NSS tools package for your distro');
+  try {
+    // 2. System trust store (elevated).
+    let sysArgv = null;
+    const quotedTmpCa = require('./system_proxy').shellQuote(tmpCa);
+    if (env.family === 'debian') {
+      sysArgv = ['/bin/sh', '-c',
+        `cp ${quotedTmpCa} /usr/local/share/ca-certificates/claude-intercept.crt && update-ca-certificates`];
+    } else if (env.family === 'rhel') {
+      sysArgv = ['/bin/sh', '-c',
+        `cp ${quotedTmpCa} /etc/pki/ca-trust/source/anchors/claude-intercept.crt && update-ca-trust extract`];
+    } else if (env.family === 'arch') {
+      sysArgv = ['/bin/sh', '-c', `trust anchor --store ${quotedTmpCa}`];
     }
-  } else {
-    record('Install certutil (libnss3-tools)', true, 'already present');
-  }
-
-  const nssdb = path.join(home, '.pki', 'nssdb');
-  if (!fs.existsSync(nssdb)) {
-    try { fs.mkdirSync(nssdb, { recursive: true }); } catch {}
-    const r = spawn('certutil', ['-N', '--empty-password', '-d', `sql:${nssdb}`]);
-    record('Initialise ~/.pki/nssdb', r && r.status === 0,
-      r && r.status === 0 ? nssdb : (r && (r.stderr || r.error?.message)) || 'certutil unavailable');
-  } else {
-    record('Initialise ~/.pki/nssdb', true, 'exists');
-  }
-
-  // 4. Chrome/Chromium NSS store (NEVER elevated — user db).
-  {
-    spawn('certutil', ['-D', '-d', `sql:${nssdb}`, '-n', 'Claude Intercept']); // idempotent delete
-    const r = spawn('certutil', ['-d', `sql:${nssdb}`, '-A', '-t', 'C,,', '-n', 'Claude Intercept', '-i', tmpCa]);
-    record('Trust in Chrome/Chromium (NSS)', r && r.status === 0,
-      r && r.status === 0 ? nssdb : (r && (r.stderr || r.error?.message)) || 'certutil unavailable');
-  }
-
-  // 5. Firefox per-profile NSS stores (NEVER elevated — user dirs).
-  {
-    const ffRoot = path.join(home, '.mozilla', 'firefox');
-    let profiles = [];
-    try {
-      profiles = fs.readdirSync(ffRoot)
-        .map(d => path.join(ffRoot, d))
-        .filter(d => {
-          try { return fs.statSync(d).isDirectory() &&
-            (fs.existsSync(path.join(d, 'cert9.db')) || fs.existsSync(path.join(d, 'cert8.db'))); }
-          catch { return false; }
-        });
-    } catch {}
-    if (!profiles.length) {
-      record('Trust in Firefox profiles', true,
-        'No NSS Firefox profiles found — set security.enterprise_roots.enabled=true to use the system store');
+    if (sysArgv) {
+      const r = runAdmin(sysArgv);
+      record('Install in system trust store', !!r.ok,
+        r.ok ? `${env.family} store updated`
+          : r.needsManual ? `Install ${caPath} into your system CA store manually; see Linux setup instructions`
+          : (r.error || 'elevation failed'));
     } else {
-      let allOk = true;
-      const done = [];
-      for (const d of profiles) {
-        spawn('certutil', ['-D', '-d', `sql:${d}`, '-n', 'Claude Intercept']);
-        const r = spawn('certutil', ['-d', `sql:${d}`, '-A', '-t', 'C,,', '-n', 'Claude Intercept', '-i', tmpCa]);
-        if (!(r && r.status === 0)) allOk = false; else done.push(path.basename(d));
+      record('Install in system trust store', false,
+        `Unknown distro family — copy ${caPath} into your CA anchors manually`);
+    }
+
+    // 3. certutil bootstrap (no sudo for the nssdb itself; install needs sudo).
+    if (!env.hasCertutil) {
+      let installArgv = null;
+      if (env.family === 'debian') installArgv = ['/bin/sh', '-c', 'apt-get install -y libnss3-tools'];
+      else if (env.family === 'rhel') installArgv = ['/bin/sh', '-c', 'dnf install -y nss-tools'];
+      else if (env.family === 'arch') installArgv = ['/bin/sh', '-c', 'pacman -S --noconfirm nss'];
+      if (installArgv) {
+        const r = runAdmin(installArgv);
+        record('Install certutil (libnss3-tools)', !!r.ok,
+          r.ok ? 'installed' : (r.error || 'elevation failed'));
+      } else {
+        record('Install certutil (libnss3-tools)', false, 'Install the NSS tools package for your distro');
       }
-      record('Trust in Firefox profiles', allOk,
-        `${done.length} profile(s); also honours security.enterprise_roots.enabled`);
+    } else {
+      record('Install certutil (libnss3-tools)', true, 'already present');
     }
-  }
 
-  try { if (tmpCa !== caPath) fs.unlinkSync(tmpCa); } catch {}
-  const ok = steps.every(s => s.ok);
-  return { steps, ok };
+    const nssdb = path.join(home, '.pki', 'nssdb');
+    if (!fs.existsSync(nssdb)) {
+      try { fs.mkdirSync(nssdb, { recursive: true }); } catch {}
+      const r = spawn('certutil', ['-N', '--empty-password', '-d', `sql:${nssdb}`]);
+      record('Initialise ~/.pki/nssdb', r && r.status === 0,
+        r && r.status === 0 ? nssdb : (r && (r.stderr || r.error?.message)) || 'certutil unavailable');
+    } else {
+      record('Initialise ~/.pki/nssdb', true, 'exists');
+    }
+
+    // 4. Chrome/Chromium NSS store (NEVER elevated — user db).
+    {
+      spawn('certutil', ['-D', '-d', `sql:${nssdb}`, '-n', 'Claude Intercept']); // idempotent delete
+      const r = spawn('certutil', ['-d', `sql:${nssdb}`, '-A', '-t', 'C,,', '-n', 'Claude Intercept', '-i', tmpCa]);
+      record('Trust in Chrome/Chromium (NSS)', r && r.status === 0,
+        r && r.status === 0 ? nssdb : (r && (r.stderr || r.error?.message)) || 'certutil unavailable');
+    }
+
+    // 5. Firefox per-profile NSS stores (NEVER elevated — user dirs).
+    {
+      const ffRoot = path.join(home, '.mozilla', 'firefox');
+      let profiles = [];
+      try {
+        profiles = fs.readdirSync(ffRoot)
+          .map(d => path.join(ffRoot, d))
+          .filter(d => {
+            try { return fs.statSync(d).isDirectory() &&
+              (fs.existsSync(path.join(d, 'cert9.db')) || fs.existsSync(path.join(d, 'cert8.db'))); }
+            catch { return false; }
+          });
+      } catch {}
+      if (!profiles.length) {
+        record('Trust in Firefox profiles', true,
+          'No NSS Firefox profiles found — set security.enterprise_roots.enabled=true to use the system store');
+      } else {
+        let allOk = true;
+        const done = [];
+        for (const d of profiles) {
+          spawn('certutil', ['-D', '-d', `sql:${d}`, '-n', 'Claude Intercept']);
+          const r = spawn('certutil', ['-d', `sql:${d}`, '-A', '-t', 'C,,', '-n', 'Claude Intercept', '-i', tmpCa]);
+          if (!(r && r.status === 0)) allOk = false; else done.push(path.basename(d));
+        }
+        record('Trust in Firefox profiles', allOk,
+          `${done.length} profile(s); also honours security.enterprise_roots.enabled`);
+      }
+    }
+
+    const ok = steps.every(s => s.ok);
+    return { steps, ok };
+  } catch (e) {
+    record('Install CA certificate', false, e.message);
+    return { steps, ok: false };
+  } finally {
+    cleanupTmpCa();
+  }
 }
 
 // Reverse trustCertLinux — remove the CA from every store we touched.
