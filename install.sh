@@ -75,23 +75,27 @@ chmod 700 "$SCRIPT_DIR/captures" "$SCRIPT_DIR/certs"
 
 # ── Optional: link CLI to PATH ────────────────────────────────────────────────
 LINK_PATH="/usr/local/bin/claude-intercept"
+printf -v LOCAL_CLI '%q %q' "$(node -p 'process.execPath')" "$SCRIPT_DIR/src/cli.js"
+START_CLI="$LOCAL_CLI"
 if [ -e "$LINK_PATH" ] || [ -L "$LINK_PATH" ]; then
   if [ -L "$LINK_PATH" ] && [ "$(readlink "$LINK_PATH")" = "$SCRIPT_DIR/src/cli.js" ]; then
     echo "  ✓ Linked: claude-intercept available globally"
+    START_CLI="claude-intercept"
   else
     echo "  ! Skipped global link — $LINK_PATH already exists"
   fi
 elif ln -s "$SCRIPT_DIR/src/cli.js" "$LINK_PATH" 2>/dev/null; then
   echo "  ✓ Linked: claude-intercept available globally"
+  START_CLI="claude-intercept"
 else
-  echo "  ! Skipped global link — run with: node $SCRIPT_DIR/src/cli.js"
+  echo "  ! Skipped global link — run with: $LOCAL_CLI"
 fi
 
 echo ""
 echo "  ✓ Installation complete!"
 echo ""
 echo "  Quick start:"
-echo "    claude-intercept start"
+echo "    $START_CLI start"
 echo ""
 if [ "$AGENT" != codex ]; then
   echo "  Claude Code: /intercept"
