@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const dns = require('node:dns');
 const http = require('node:http');
+const net = require('node:net');
 const os = require('node:os');
 const tls = require('node:tls');
 const ProxyServer = require('../index');
@@ -89,6 +90,95 @@ test('large uploads and downloads pass through intact while captures stay bounde
   assert.equal(notifications[0].data.requestHeaders, undefined);
   assert.equal(notifications[0].data.requestBodyPreview, undefined);
   assert.equal(notifications[0].data.responseBodyPreview, undefined);
+});
+
+test('trickled response headers time out while a response body may stream longer', async t => {
+  const sockets = new Set();
+  let drippedBytes = 0;
+  const trickle = net.createServer(socket => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    let interval;
+    socket.once('data', () => {
+      socket.write('HTTP/1.1 200 OK\r\nX-Trickle: ');
+      interval = setInterval(() => {
+        drippedBytes++;
+        socket.write('x');
+      }, 30);
+    });
+    socket.on('close', () => clearInterval(interval));
+  });
+  const tricklePort = await listen(trickle);
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    await close(trickle);
+  });
+
+  const streaming = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.write('first');
+    setTimeout(() => res.end('second'), 550);
+  });
+  const streamingPort = await listen(streaming);
+  t.after(() => close(streaming));
+
+  const proxy = new ProxyServer({
+    port: 0, responseHeaderTimeoutMs: 350,
+    db: { insertCapture() { return 1; } }, broadcast: () => {},
+  });
+  await proxy.listen();
+  t.after(() => close(proxy.server));
+  const proxyPort = proxy.server.address().port;
+  const getThroughProxy = originPort => new Promise((resolve, reject) => {
+    const request = http.get({
+      host: '127.0.0.1', port: proxyPort,
+      path: `http://127.0.0.1:${originPort}/`,
+    }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+    });
+    request.on('error', reject);
+    request.setTimeout(2_000, () => request.destroy(new Error('Client timed out')));
+  });
+
+  const stalled = await getThroughProxy(tricklePort);
+  assert.ok(drippedBytes >= 2, 'the upstream kept sending header bytes');
+  assert.equal(stalled.status, 502);
+  const streamed = await getThroughProxy(streamingPort);
+  assert.deepEqual(streamed, { status: 200, body: 'firstsecond' });
+});
+
+test('a slow upload gets its full response-header deadline after sending finishes', async t => {
+  const origin = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk.toString(); });
+    req.on('end', () => res.end(body));
+  });
+  const originPort = await listen(origin);
+  t.after(() => close(origin));
+  const proxy = new ProxyServer({
+    port: 0, responseHeaderTimeoutMs: 150,
+    db: { insertCapture() { return 1; } }, broadcast: () => {},
+  });
+  await proxy.listen();
+  t.after(() => close(proxy.server));
+
+  const result = await new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1', port: proxy.server.address().port, method: 'POST',
+      path: `http://127.0.0.1:${originPort}/`,
+    }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
+    });
+    req.on('error', reject);
+    req.setTimeout(2_000, () => req.destroy(new Error('Client timed out')));
+    req.write('first');
+    setTimeout(() => req.end('second'), 300);
+  });
+  assert.deepEqual(result, { status: 200, body: 'firstsecond' });
 });
 
 test('capture quota reports once per full episode while forwarding continues', async t => {

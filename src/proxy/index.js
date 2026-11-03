@@ -10,6 +10,7 @@ const { URL } = require('url');
 const certManager = require('./cert_manager');
 const { tryDecodeBody, MAX_BODY } = require('./body');
 const MAX_ACTIVE_CAPTURE_BYTES = 32 * MAX_BODY;
+const RESPONSE_HEADER_TIMEOUT_MS = 120_000;
 
 // LAN clients may use the proxy for public destinations, but must not be able
 // to reach this machine's dashboard, cloud metadata endpoints, or other local
@@ -223,7 +224,11 @@ function webSocketHeaders(headers, host, port) {
 }
 
 class ProxyServer {
-  constructor({ port = 8080, uiPort = 7778, listenHost = '127.0.0.1', db, broadcast }) {
+  constructor({ port = 8080, uiPort = 7778, listenHost = '127.0.0.1', db, broadcast,
+    responseHeaderTimeoutMs = RESPONSE_HEADER_TIMEOUT_MS }) {
+    if (!Number.isSafeInteger(responseHeaderTimeoutMs) || responseHeaderTimeoutMs < 1) {
+      throw new RangeError('responseHeaderTimeoutMs must be a positive integer');
+    }
     this.port = port;
     this.uiPort = uiPort;
     this.listenHost = listenHost;
@@ -232,6 +237,7 @@ class ProxyServer {
     this.paused = false;
     this._captureQuotaReported = false;
     this._captureBudget = { max: MAX_ACTIVE_CAPTURE_BYTES, used: 0 };
+    this._responseHeaderTimeoutMs = responseHeaderTimeoutMs;
 
     // Handles plain HTTP proxy requests
     this.server = http.createServer((req, res) => {
@@ -530,9 +536,16 @@ class ProxyServer {
     try {
       return await new Promise((resolve) => {
         let settled = false;
+        let responseHeadersReceived = false;
+        let responseHeaderTimer;
+        const clearResponseHeaderTimer = () => {
+          clearTimeout(responseHeaderTimer);
+          responseHeaderTimer = undefined;
+        };
         const finish = () => {
           if (settled) return;
           settled = true;
+          clearResponseHeaderTimer();
           resolve();
         };
         const proxyReq = lib.request(options, (proxyRes) => {
@@ -540,6 +553,8 @@ class ProxyServer {
             proxyRes.destroy();
             return;
           }
+          responseHeadersReceived = true;
+          clearResponseHeaderTimer();
           responseCapture = captureBody(this._captureBudget);
           const passHeaders = stripHopByHopHeaders(proxyRes.headers);
 
@@ -618,6 +633,15 @@ class ProxyServer {
           finish();
         });
 
+        // The socket timeout below resets whenever a peer drips bytes. Start
+        // an absolute deadline once the upload has finished, and clear it as
+        // soon as complete response headers arrive. Bodies may stream longer.
+        proxyReq.on('finish', () => {
+          if (settled || responseHeadersReceived) return;
+          responseHeaderTimer = setTimeout(() => {
+            proxyReq.destroy(new Error('Upstream response headers timeout'));
+          }, this._responseHeaderTimeoutMs);
+        });
         proxyReq.setTimeout(120_000, () => proxyReq.destroy(new Error('Upstream timeout')));
         req.on('error', err => proxyReq.destroy(err));
         req.on('close', () => { if (req.aborted) proxyReq.destroy(); });
