@@ -219,7 +219,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   });
 
   app.delete('/api/captures/batch', (req, res) => {
-    const { ids } = req.body;
+    const ids = req.body?.ids;
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ error: 'ids required' });
     db.deleteCaptures(ids);
     broadcast({ type: 'deleted', data: { ids } });
@@ -319,7 +319,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
   });
 
   // Serve SPA for all other routes
-  app.get('*', (req, res) => {
+  app.get('/{*splat}', (req, res) => {
     res.type('html').send(dashboardHtml);
   });
 

@@ -2,7 +2,8 @@
 'use strict';
 
 const { program } = require('commander');
-const chalk = require('chalk');
+const chalkModule = require('chalk');
+const chalk = chalkModule.default || chalkModule;
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
