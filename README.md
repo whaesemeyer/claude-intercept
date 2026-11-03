@@ -42,7 +42,7 @@ bash install.sh
 
 The installer:
 - Verifies Node.js version
-- Runs `npm install`
+- Installs the locked dependency versions with `npm ci --ignore-scripts`
 - Installs a shared Intercept skill for Claude Code and Codex
 - Links `claude-intercept` to your PATH
 
@@ -117,7 +117,7 @@ claude-intercept <command> [options]
 | Command | Description |
 |---------|-------------|
 | `start` | Start proxy + dashboard for this machine only (opens browser automatically) |
-| `start --lan` | Allow devices on your LAN to reach the proxy and dashboard |
+| `start --lan` | Allow LAN devices to use the proxy and download its CA certificate; dashboard stays local |
 | `start --proxy-port 9090 --ui-port 9091 --no-open` | Custom ports, no auto-open |
 | `start --daemon` | Run detached in the background (logs to `captures/intercept.log`); `stop`/`status` then work from any shell |
 | `stop` | Stop a running instance |
@@ -126,9 +126,9 @@ claude-intercept <command> [options]
 | `clear` | Delete all captured traffic |
 | `devices` | List device labels seen in captured traffic (`--json` for parity) |
 | `cert` | Print path to the CA certificate |
-| `export --mode api-docs` | Export for Claude — document discovered APIs |
+| `export --mode api-docs` | Generate API documentation locally; may include captured secrets |
 | `export --mode auth` | Extract Bearer tokens, cookies, API keys |
-| `export --mode summary` | High-level traffic overview |
+| `export` or `export --mode summary` | High-level traffic overview (default; excludes raw URLs, headers, and bodies) |
 | `export --mode full --host api.example.com` | Full headers + bodies for one host |
 | `export --device iPhone` | Only captures from a given device (see `devices`) |
 | `export --mode summary --json` | Aggregate JSON without captured headers, bodies, or URLs |
@@ -178,7 +178,7 @@ node ~/claude_intercept/src/cli.js untrust
 ### iPhone / iPad
 
 Start with `claude-intercept start --lan` (or `start --daemon --lan`) so your
-phone can reach the proxy and dashboard. If it is already running in local-only
+phone can reach the proxy and CA certificate download. If it is already running in local-only
 mode, stop it before restarting with `--lan`.
 
 1. Install the CA certificate:
@@ -193,7 +193,7 @@ mode, stop it before restarting with `--lan`.
 ### Android
 
 Start with `claude-intercept start --lan` (or `start --daemon --lan`) so your
-phone can reach the proxy and dashboard.
+phone can reach the proxy and CA certificate download.
 
 1. Configure proxy: **Settings → Wi-Fi → long-press network → Modify → Proxy: Manual**
    - Hostname: your Mac's LAN IP
@@ -229,7 +229,7 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 
 1. Check the boxes next to requests you want to analyze
 2. Click **Export Selected →** → choose an export mode → **Generate Export**
-3. Copy the output and paste into Claude
+3. Review the output. Share only the summary or a redacted detailed export with an agent.
 
 ### From Claude Code
 
@@ -241,7 +241,9 @@ Then ask Claude directly:
 - *"Identify which hosts use authentication without showing credential values"*
 - *"What authentication pattern is this app using?"*
 
-Claude will run the export, read the output, and give you a full analysis — no copy/paste needed.
+The skill starts with an aggregate summary. For detailed analysis, it writes
+raw exports to a private local file and reports findings without sharing
+credential values in chat.
 
 ---
 
@@ -249,10 +251,17 @@ Claude will run the export, read the output, and give you a full analysis — no
 
 - The CA private key is generated once on your machine and stored at `certs/ca.key`. It never leaves your machine and is excluded from git.
 - Each machine gets a unique CA — certificates from one installation cannot decrypt traffic intercepted by another.
-- All captured data is stored locally in `captures/captures.db` (SQLite), also excluded from git.
-- The proxy and dashboard bind to `127.0.0.1` by default. `start --lan` binds
-  both to `0.0.0.0` for device setup; other devices on that network can then
-  reach the dashboard and captured traffic. Stop LAN mode when finished.
+- All captured data is stored locally in `captures/captures.db` (SQLite), also excluded from git. The database and private keys are owner-only files, but the database is not encrypted; other processes running as your user can read it.
+- The proxy and dashboard bind to `127.0.0.1` by default. `start --lan` lets
+  other devices use the proxy and download the public CA certificate. The
+  dashboard, capture API, and admin routes remain accessible only from this
+  machine. LAN mode binds to all network interfaces and the proxy has no
+  password. LAN clients can reach public destinations through it, but local and
+  private destinations are blocked. Use it only on a trusted network and stop
+  it when finished.
+- The dashboard has no login. Any local account that can connect to this
+  machine's loopback interface can inspect captures and use dashboard controls;
+  run it on a trusted single-user workstation.
 - API docs, full, and authentication exports can contain passwords, cookies, and tokens.
   Keep those exports local and do not paste them into an agent chat.
 

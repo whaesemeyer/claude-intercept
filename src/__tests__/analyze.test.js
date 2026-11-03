@@ -11,7 +11,7 @@ const sample = [
 ];
 
 test('buildJsonExport returns { meta, captures } shape', () => {
-  const out = buildJsonExport(sample, { generatedAt: 'FIXED' });
+  const out = buildJsonExport(sample, { mode: 'full', generatedAt: 'FIXED' });
   assert.deepStrictEqual(Object.keys(out).sort(), ['captures', 'meta']);
   assert.strictEqual(out.meta.count, 3);
   assert.strictEqual(out.meta.generatedAt, 'FIXED');
@@ -23,7 +23,7 @@ test('meta.hosts is unique and sorted', () => {
 });
 
 test('captures pass through unchanged', () => {
-  const out = buildJsonExport(sample, { generatedAt: 'FIXED' });
+  const out = buildJsonExport(sample, { mode: 'full', generatedAt: 'FIXED' });
   assert.deepStrictEqual(out.captures, sample);
 });
 
@@ -34,7 +34,7 @@ test('meta overrides are merged last (e.g. mode)', () => {
 });
 
 test('empty input yields a valid, parseable document', () => {
-  const out = buildJsonExport([], { generatedAt: 'FIXED' });
+  const out = buildJsonExport([], { mode: 'full', generatedAt: 'FIXED' });
   assert.strictEqual(out.meta.count, 0);
   assert.deepStrictEqual(out.meta.hosts, []);
   assert.deepStrictEqual(out.captures, []);
@@ -64,6 +64,12 @@ test('summary exports never include raw URLs, headers, bodies, or credentials', 
   const markdown = buildClaudeExport(captures, 'summary');
   assert.ok(!markdown.includes(secret));
   assert.ok(!markdown.includes('/profile'));
+
+  const defaultJson = buildJsonExport(captures);
+  const defaultMarkdown = buildClaudeExport(captures);
+  assert.strictEqual(defaultJson.meta.mode, 'summary');
+  assert.ok(!JSON.stringify(defaultJson).includes(secret));
+  assert.ok(!defaultMarkdown.includes(secret));
 });
 
 test('empty JSON summary has a finite average response time', () => {

@@ -26,11 +26,12 @@ can inspect the capture:
 {{CLI}} status --json
 ```
 
-For a phone or another LAN device, add `--lan` to the start command so both
-the proxy and dashboard accept connections from that device. LAN mode exposes
-captured traffic to other devices on the same network; use the local default
-for this machine's traffic. If a local-only instance is already running, stop
-it before restarting in LAN mode.
+For a phone or another LAN device, add `--lan` to the start command so the
+device can use the proxy for public destinations and download its CA
+certificate. The dashboard and captured traffic remain accessible only from
+this machine. The LAN proxy has no password, so use it only on a trusted
+network. If a local-only instance is
+already running, stop it before restarting in LAN mode.
 
 The defaults are proxy `127.0.0.1:7777` and dashboard
 `http://127.0.0.1:7778`. Startup output reports the configured ports. If startup

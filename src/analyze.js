@@ -4,13 +4,13 @@
  * Formats captured HTTP traffic for Claude analysis.
  * Modes: 'api-docs' | 'auth' | 'summary' | 'full'
  */
-function buildClaudeExport(captures, mode = 'api-docs') {
+function buildClaudeExport(captures, mode = 'summary') {
   switch (mode) {
     case 'api-docs': return buildApiDocs(captures);
     case 'auth':     return buildAuthExport(captures);
     case 'summary':  return buildSummary(captures);
     case 'full':     return buildFull(captures);
-    default:         return buildApiDocs(captures);
+    default:         return buildSummary(captures);
   }
 }
 
@@ -347,13 +347,15 @@ function findKeys(obj, pattern, host, url, results, prefix = '') {
  * `generatedAt` for deterministic tests.
  */
 function buildJsonExport(captures, meta = {}) {
+  const mode = meta.mode || 'summary';
   const header = {
     count: captures.length,
     hosts: [...new Set(captures.map(c => c.host))].sort(),
     generatedAt: new Date().toISOString(),
     ...meta,
+    mode,
   };
-  if (meta.mode === 'summary') return { meta: header, summary: summarizeCaptures(captures) };
+  if (mode === 'summary') return { meta: header, summary: summarizeCaptures(captures) };
   return { meta: header, captures };
 }
 
