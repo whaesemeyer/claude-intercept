@@ -28,6 +28,7 @@ const OPCODES = {
 // top of this when persisting.
 const MAX_MESSAGE_BYTES = 32 * 1024;
 const MAX_OBSERVED_BYTES = 256 * 1024;
+const MAX_EMITTED_MESSAGES = 200;
 
 // permessage-deflate appends this trailer to every compressed message; RFC 7692
 // requires it be restored before inflating with a raw-deflate context.
@@ -38,11 +39,14 @@ class WsFrameParser {
   // extension (see parseHandshakeResponse). When set, messages whose first
   // frame carries the RSV1 bit are inflated before being returned.
   constructor({ maxMessageBytes = MAX_MESSAGE_BYTES, maxObservedBytes = MAX_OBSERVED_BYTES,
-    permessageDeflate = false } = {}) {
+    maxMessages = MAX_EMITTED_MESSAGES, permessageDeflate = false } = {}) {
     this._buf = Buffer.alloc(0);
     this._maxMessageBytes = maxMessageBytes;
     this._maxObservedBytes = maxObservedBytes;
     this._observedBytes = 0;
+    this._maxMessages = Number.isSafeInteger(maxMessages) && maxMessages > 0
+      ? Math.min(maxMessages, MAX_EMITTED_MESSAGES) : MAX_EMITTED_MESSAGES;
+    this._emittedMessages = 0;
     this.stopped = false;
     this._permessageDeflate = permessageDeflate;
 
@@ -70,7 +74,14 @@ class WsFrameParser {
     let frame;
     while ((frame = this._readFrame()) !== null) {
       const msg = this._assemble(frame);
-      if (msg) out.push(msg);
+      if (msg) {
+        out.push(msg);
+        this._emittedMessages++;
+        if (this._emittedMessages >= this._maxMessages) {
+          this._stop();
+          break;
+        }
+      }
     }
     if (observed.length < chunk.length) this._stop();
     return out;
@@ -262,4 +273,5 @@ module.exports = {
   OPCODE_NAMES,
   MAX_MESSAGE_BYTES,
   MAX_OBSERVED_BYTES,
+  MAX_EMITTED_MESSAGES,
 };

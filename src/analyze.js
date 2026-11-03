@@ -15,56 +15,78 @@ function buildClaudeExport(captures, mode = 'summary') {
 }
 
 // ── API Documentation mode ────────────────────────────────────────────────────
+function buildApiDocsData(captures) {
+  const endpoints = [];
+  for (const [host, methods] of groupByEndpoint(captures)) {
+    for (const [key, samples] of methods) {
+      const [method, path] = key.split(' ', 2);
+      const sample = samples[0];
+      endpoints.push({
+        host,
+        method,
+        path,
+        callsCaptured: samples.length,
+        statusCodes: [...new Set(samples.map(s => s.responseStatus))],
+        contentType: safeContentType(sample.contentType),
+        averageDurationMs: Math.round(samples.reduce((a, s) => a + (s.duration || 0), 0) / samples.length),
+        requestHeaderNames: getNotableHeaders(sample.requestHeaders || {}).map(([name]) => name),
+        requestBodyStructure: sample.requestBody ? bodyStructure(sample.requestBody) : null,
+        responseBodyStructure: sample.responseBody ? bodyStructure(sample.responseBody) : null,
+      });
+    }
+  }
+  return endpoints;
+}
+
+const COMMON_CONTENT_TYPES = new Set([
+  'application/json', 'application/xml', 'application/octet-stream',
+  'application/x-www-form-urlencoded', 'multipart/form-data',
+  'text/plain', 'text/html', 'text/css', 'text/javascript',
+  'image/png', 'image/jpeg', 'image/gif', 'image/svg+xml',
+]);
+
+function safeContentType(raw) {
+  const type = String(raw || '').split(';', 1)[0].trim().toLowerCase();
+  return type ? (COMMON_CONTENT_TYPES.has(type) ? type : '[other]') : '';
+}
+
 function buildApiDocs(captures) {
-  const endpoints = groupByEndpoint(captures);
+  const endpoints = buildApiDocsData(captures);
   const lines = [
     '# API Traffic Analysis',
     `> Captured ${captures.length} requests across ${new Set(captures.map(c => c.host)).size} hosts`,
     '',
   ];
 
-  for (const [host, methods] of Object.entries(endpoints)) {
-    lines.push(`## Host: ${host}`, '');
-    for (const [key, samples] of Object.entries(methods)) {
-      const [method, path] = key.split(' ', 2);
-      const sample = samples[0];
-      const statuses = [...new Set(samples.map(s => s.responseStatus))];
-      const ct = sample.contentType?.split(';')[0] || '';
-
-      lines.push(`### ${method} ${path}`, '');
-      lines.push(`- **Calls captured:** ${samples.length}`);
-      lines.push(`- **Status codes:** ${statuses.join(', ')}`);
-      lines.push(`- **Content-Type:** ${ct || '(none)'}`);
-      lines.push(`- **Avg duration:** ${Math.round(samples.reduce((a,s) => a + (s.duration||0), 0) / samples.length)}ms`);
-
-      // Notable request headers
-      const notable = getNotableHeaders(sample.requestHeaders || {});
-      if (notable.length) {
-        lines.push('');
-        lines.push('**Request Headers (notable):**');
-        notable.forEach(([k, v]) => lines.push(`- \`${k}: ${truncate(v, 120)}\``));
-      }
-
-      // Request body sample
-      if (sample.requestBody) {
-        lines.push('');
-        lines.push('**Request Body (sample):**');
-        lines.push('```');
-        lines.push(formatBody(sample.requestBody, 600));
-        lines.push('```');
-      }
-
-      // Response body sample
-      if (sample.responseBody) {
-        lines.push('');
-        lines.push('**Response Body (sample):**');
-        lines.push('```');
-        lines.push(formatBody(sample.responseBody, 800));
-        lines.push('```');
-      }
-
-      lines.push('');
+  let previousHost;
+  for (const endpoint of endpoints) {
+    if (endpoint.host !== previousHost) {
+      lines.push(`## Host: ${endpoint.host}`, '');
+      previousHost = endpoint.host;
     }
+    lines.push(`### ${endpoint.method} ${endpoint.path}`, '');
+    lines.push(`- **Calls captured:** ${endpoint.callsCaptured}`);
+    lines.push(`- **Status codes:** ${endpoint.statusCodes.join(', ')}`);
+    lines.push(`- **Content-Type:** ${endpoint.contentType || '(none)'}`);
+    lines.push(`- **Avg duration:** ${endpoint.averageDurationMs}ms`);
+
+    // Documentation exports omit captured header and body values. Credential
+    // extraction and full detail remain separate explicit modes.
+    if (endpoint.requestHeaderNames.length) {
+      lines.push('', '**Request Headers (notable):**');
+      endpoint.requestHeaderNames.forEach(name => lines.push(`- \`${name}: [value omitted]\``));
+    }
+    for (const [label, structure] of [
+      ['Request', endpoint.requestBodyStructure],
+      ['Response', endpoint.responseBodyStructure],
+    ]) {
+      if (structure === null) continue;
+      lines.push('', `**${label} Body (structure):**`, '```');
+      lines.push(typeof structure === 'string' && structure === '[non-JSON body omitted]'
+        ? structure : JSON.stringify(structure, null, 2));
+      lines.push('```');
+    }
+    lines.push('');
   }
 
   lines.push('---');
@@ -282,14 +304,15 @@ function buildFull(captures) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function groupByEndpoint(captures) {
-  const result = {};
+  const result = new Map();
   for (const c of captures) {
     const host = c.host;
-    if (!result[host]) result[host] = {};
+    if (!result.has(host)) result.set(host, new Map());
     const normalizedPath = normalizePath(c.path || '/');
     const key = `${c.method} ${normalizedPath}`;
-    if (!result[host][key]) result[host][key] = [];
-    result[host][key].push(c);
+    const methods = result.get(host);
+    if (!methods.has(key)) methods.set(key, []);
+    methods.get(key).push(c);
   }
   return result;
 }
@@ -318,6 +341,25 @@ function formatBody(body, maxLen) {
   return truncate(out, maxLen);
 }
 
+function bodyStructure(body) {
+  let value;
+  try { value = JSON.parse(body); } catch { return '[non-JSON body omitted]'; }
+
+  function describe(item, depth = 0) {
+    if (item === null) return 'null';
+    if (depth >= 6) return '[nested structure omitted]';
+    if (Array.isArray(item)) return item.length ? [describe(item[0], depth + 1)] : [];
+    if (typeof item !== 'object') return typeof item;
+    const shape = Object.create(null);
+    for (const [key, nested] of Object.entries(item).slice(0, 50)) {
+      shape[key] = describe(nested, depth + 1);
+    }
+    return shape;
+  }
+
+  return describe(value);
+}
+
 function truncate(str, max) {
   if (!str) return '';
   const s = String(str);
@@ -341,13 +383,16 @@ function findKeys(obj, pattern, host, url, results, prefix = '') {
 
 // ── Machine-readable export ───────────────────────────────────────────────────
 /**
- * Structured JSON for programmatic/agent consumption. Summary mode returns
- * aggregates only; other modes retain the raw capture records.
+ * Structured JSON for programmatic/agent consumption. Summary and API
+ * documentation omit captured header and body values. Only full mode returns
+ * raw capture records.
  * `meta` overrides are shallow-merged last so callers can inject a fixed
  * `generatedAt` for deterministic tests.
  */
 function buildJsonExport(captures, meta = {}) {
-  const mode = meta.mode || 'summary';
+  const requestedMode = meta.mode || 'summary';
+  const mode = ['summary', 'api-docs', 'auth', 'full'].includes(requestedMode)
+    ? requestedMode : 'summary';
   const header = {
     count: captures.length,
     hosts: [...new Set(captures.map(c => c.host))].sort(),
@@ -356,6 +401,8 @@ function buildJsonExport(captures, meta = {}) {
     mode,
   };
   if (mode === 'summary') return { meta: header, summary: summarizeCaptures(captures) };
+  if (mode === 'api-docs') return { meta: header, endpoints: buildApiDocsData(captures) };
+  if (mode === 'auth') return { meta: header, findings: buildAuthExport(captures) };
   return { meta: header, captures };
 }
 

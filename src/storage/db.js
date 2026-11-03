@@ -11,8 +11,29 @@ const MAX_QUERY_LIMIT = 5000;
 const MAX_WS_QUERY_LIMIT = 100;
 const MAX_WS_FRAMES_PER_CONNECTION = 200;
 const MAX_WS_PAYLOAD_BYTES = 8192;
+const MIB = 1024 * 1024;
+const DEFAULT_CAPTURE_LIMIT_BYTES = 512 * MIB;
 
 let db;
+let pageSize = 4096;
+let captureLimitPages = DEFAULT_CAPTURE_LIMIT_BYTES / pageSize;
+let storageLimitReached = false;
+
+function configuredCaptureLimit(override) {
+  if (override !== undefined) {
+    if (!Number.isSafeInteger(override) || override < MIB) {
+      throw new RangeError('Capture database limit must be at least 1 MiB');
+    }
+    return override;
+  }
+  const setting = process.env.CLAUDE_INTERCEPT_MAX_CAPTURE_MB;
+  if (setting === undefined) return DEFAULT_CAPTURE_LIMIT_BYTES;
+  const mb = Number(setting);
+  if (!Number.isSafeInteger(mb) || mb < 16 || mb > 8192) {
+    throw new RangeError('CLAUDE_INTERCEPT_MAX_CAPTURE_MB must be an integer from 16 to 8192');
+  }
+  return mb * MIB;
+}
 
 function secureFile(filePath) {
   try {
@@ -25,7 +46,9 @@ function secureFile(filePath) {
   }
 }
 
-function init() {
+function init({ maxCaptureBytes } = {}) {
+  const limitBytes = configuredCaptureLimit(maxCaptureBytes);
+  if (db) db.close();
   fs.mkdirSync(DB_DIR, { recursive: true, mode: 0o700 });
   if (!fs.lstatSync(DB_DIR).isDirectory()) {
     throw new Error(`Capture path is not a directory: ${DB_DIR}`);
@@ -42,6 +65,7 @@ function init() {
   secureFile(DB_PATH);
 
   db = new DatabaseSync(DB_PATH);
+  db.exec('PRAGMA foreign_keys = ON');
   db.exec('PRAGMA journal_mode = WAL');
 
   db.exec(`
@@ -66,7 +90,7 @@ function init() {
     CREATE INDEX IF NOT EXISTS idx_timestamp ON captures(timestamp);
     CREATE TABLE IF NOT EXISTS ws_frames (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      connection_id INTEGER NOT NULL,
+      connection_id INTEGER NOT NULL REFERENCES captures(id) ON DELETE CASCADE,
       timestamp     INTEGER NOT NULL,
       direction     TEXT    NOT NULL,
       opcode        INTEGER NOT NULL,
@@ -81,6 +105,9 @@ function init() {
 
   // Earlier preview builds may have created ws_frames before compression was tracked.
   try { db.exec('ALTER TABLE ws_frames ADD COLUMN compressed INTEGER NOT NULL DEFAULT 0'); } catch {}
+  // Existing preview tables may not have a foreign key, so remove payloads
+  // whose capture was deleted before this version was installed.
+  db.exec('DELETE FROM ws_frames WHERE NOT EXISTS (SELECT 1 FROM captures WHERE captures.id = ws_frames.connection_id)');
 
   // Migration: add device columns (safe to run on existing DBs — errors = column already exists)
   try { db.exec("ALTER TABLE captures ADD COLUMN client_ip TEXT"); } catch {}
@@ -97,6 +124,12 @@ function init() {
   for (const filePath of [`${DB_PATH}-wal`, `${DB_PATH}-shm`, `${DB_PATH}-journal`]) {
     secureFile(filePath);
   }
+
+  pageSize = db.prepare('PRAGMA page_size').get().page_size;
+  const requestedPages = Math.max(1, Math.floor(limitBytes / pageSize));
+  captureLimitPages = db.prepare(`PRAGMA max_page_count = ${requestedPages}`).get().max_page_count;
+  db.exec(`PRAGMA journal_size_limit = ${16 * MIB}`);
+  storageLimitReached = false;
 
   return db;
 }
@@ -115,26 +148,39 @@ function insertCapture(capture) {
        $contentType, $duration, $clientIp, $clientLabel)
   `);
 
-  const result = stmt.run({
-    $timestamp: capture.timestamp,
-    $method: capture.method,
-    $url: capture.url,
-    $host: capture.host,
-    $path: capture.path,
-    $requestHeaders: JSON.stringify(capture.requestHeaders || {}),
-    $requestBody: capture.requestBody || '',
-    $requestEncoding: capture.requestEncoding || 'identity',
-    $requestBodySize: capture.requestBodySize || 0,
-    $responseStatus: capture.responseStatus,
-    $responseHeaders: JSON.stringify(capture.responseHeaders || {}),
-    $responseBody: capture.responseBody || '',
-    $responseEncoding: capture.responseEncoding || 'identity',
-    $responseBodySize: capture.responseBodySize || 0,
-    $contentType: capture.contentType || '',
-    $duration: capture.duration || 0,
-    $clientIp: capture.clientIp || '',
-    $clientLabel: capture.clientLabel || '',
-  });
+  let result;
+  try {
+    result = stmt.run({
+      $timestamp: capture.timestamp,
+      $method: capture.method,
+      $url: capture.url,
+      $host: capture.host,
+      $path: capture.path,
+      $requestHeaders: JSON.stringify(capture.requestHeaders || {}),
+      $requestBody: capture.requestBody || '',
+      $requestEncoding: capture.requestEncoding || 'identity',
+      $requestBodySize: capture.requestBodySize || 0,
+      $responseStatus: capture.responseStatus,
+      $responseHeaders: JSON.stringify(capture.responseHeaders || {}),
+      $responseBody: capture.responseBody || '',
+      $responseEncoding: capture.responseEncoding || 'identity',
+      $responseBodySize: capture.responseBodySize || 0,
+      $contentType: capture.contentType || '',
+      $duration: capture.duration || 0,
+      $clientIp: capture.clientIp || '',
+      $clientLabel: capture.clientLabel || '',
+    });
+  } catch (err) {
+    if (err.code === 'SQLITE_FULL' || /database or disk is full/i.test(err.message)) {
+      storageLimitReached = true;
+      const quotaError = new Error('Capture database limit or disk capacity reached');
+      quotaError.code = 'CAPTURE_QUOTA_EXCEEDED';
+      throw quotaError;
+    }
+    throw err;
+  }
+
+  storageLimitReached = false;
 
   return Number(result.lastInsertRowid);
 }
@@ -150,6 +196,8 @@ function queryCaptures({
   afterId,
   limit = 100,
   offset = 0,
+  summaryOnly = false,
+  listOnly = false,
 } = {}) {
   const requestedLimit = Number(limit);
   const requestedOffset = Number(offset);
@@ -211,19 +259,23 @@ function queryCaptures({
 
   const rows = db
     .prepare(
-      `SELECT * FROM captures ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`
+      `SELECT ${summaryOnly ? 'id, host, method, response_status, duration_ms'
+        : listOnly ? 'id, timestamp, method, url, host, path, response_status, duration_ms, client_label'
+          : '*'}
+       FROM captures ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`
     )
     .all({ ...params, $limit: boundedLimit, $offset: boundedOffset });
 
   return {
     total: Number(total),
-    rows: rows.map(parseRow),
+    rows: rows.map(summaryOnly ? parseSummaryRow : listOnly ? parseListRow : parseRow),
   };
 }
 
-function getCaptureById(id) {
-  const row = db.prepare('SELECT * FROM captures WHERE id = $id').get({ $id: id });
-  return row ? parseRow(row) : null;
+function getCaptureById(id, { summaryOnly = false } = {}) {
+  const columns = summaryOnly ? 'id, host, method, response_status, duration_ms' : '*';
+  const row = db.prepare(`SELECT ${columns} FROM captures WHERE id = $id`).get({ $id: id });
+  return row ? (summaryOnly ? parseSummaryRow(row) : parseRow(row)) : null;
 }
 
 function clearCaptures() {
@@ -232,6 +284,7 @@ function clearCaptures() {
     db.prepare('DELETE FROM ws_frames').run();
     db.prepare('DELETE FROM captures').run();
     db.exec('COMMIT');
+    storageLimitReached = false;
   } catch (err) {
     db.exec('ROLLBACK');
     throw err;
@@ -247,6 +300,7 @@ function deleteCaptures(ids) {
     db.prepare(`DELETE FROM ws_frames WHERE connection_id IN (${placeholders})`).run(...ids);
     const deleted = db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids).changes;
     db.exec('COMMIT');
+    if (deleted) storageLimitReached = false;
     return deleted;
   } catch (err) {
     db.exec('ROLLBACK');
@@ -261,22 +315,36 @@ function insertWsFrame(frame) {
     throw new RangeError('Invalid or oversized WebSocket frame capture');
   }
   if (getWsFrameCount(frame.connectionId) >= MAX_WS_FRAMES_PER_CONNECTION) return null;
-  const result = db.prepare(`
-    INSERT INTO ws_frames
-      (connection_id, timestamp, direction, opcode, is_text, payload, payload_size, truncated, compressed)
-    VALUES
-      ($connectionId, $timestamp, $direction, $opcode, $isText, $payload, $payloadSize, $truncated, $compressed)
-  `).run({
-    $connectionId: frame.connectionId,
-    $timestamp: frame.timestamp,
-    $direction: frame.direction,
-    $opcode: frame.opcode,
-    $isText: frame.isText ? 1 : 0,
-    $payload: frame.payload,
-    $payloadSize: frame.payloadSize,
-    $truncated: frame.truncated ? 1 : 0,
-    $compressed: frame.compressed ? 1 : 0,
-  });
+  let result;
+  try {
+    result = db.prepare(`
+      INSERT INTO ws_frames
+        (connection_id, timestamp, direction, opcode, is_text, payload, payload_size, truncated, compressed)
+      SELECT $connectionId, $timestamp, $direction, $opcode, $isText,
+        $payload, $payloadSize, $truncated, $compressed
+      WHERE EXISTS (SELECT 1 FROM captures WHERE id = $connectionId)
+    `).run({
+      $connectionId: frame.connectionId,
+      $timestamp: frame.timestamp,
+      $direction: frame.direction,
+      $opcode: frame.opcode,
+      $isText: frame.isText ? 1 : 0,
+      $payload: frame.payload,
+      $payloadSize: frame.payloadSize,
+      $truncated: frame.truncated ? 1 : 0,
+      $compressed: frame.compressed ? 1 : 0,
+    });
+  } catch (err) {
+    if (err.code === 'SQLITE_FULL' || /database or disk is full/i.test(err.message)) {
+      storageLimitReached = true;
+      const quotaError = new Error('Capture database limit or disk capacity reached');
+      quotaError.code = 'CAPTURE_QUOTA_EXCEEDED';
+      throw quotaError;
+    }
+    throw err;
+  }
+  if (!result.changes) return null;
+  storageLimitReached = false;
   return Number(result.lastInsertRowid);
 }
 
@@ -301,7 +369,7 @@ function finalizeWsCapture(id, { duration, responseBody, responseStatus }) {
   return db.prepare(`UPDATE captures SET duration_ms = $duration,
     response_body = $responseBody, response_status = $responseStatus WHERE id = $id`)
     .run({ $id: id, $duration: duration || 0, $responseBody: responseBody || '',
-      $responseStatus: responseStatus || 101 }).changes;
+      $responseStatus: responseStatus ?? 101 }).changes;
 }
 
 function getStats() {
@@ -313,11 +381,16 @@ function getStats() {
       MAX(id) as lastId
      FROM captures`
   ).get();
+  const pages = db.prepare('PRAGMA page_count').get().page_count;
+  const freePages = db.prepare('PRAGMA freelist_count').get().freelist_count;
   return {
     total: Number(row?.total || 0),
     hosts: Number(row?.hosts || 0),
     avgDuration: row?.avgDuration || 0,
     lastId: Number(row?.lastId || 0),
+    storageBytes: pages * pageSize,
+    storageLimitBytes: captureLimitPages * pageSize,
+    storageLimitReached: storageLimitReached || (pages >= captureLimitPages && freePages === 0),
   };
 }
 
@@ -357,6 +430,30 @@ function parseFrameRow(row) {
     payloadSize: Number(row.payload_size || 0),
     truncated: Boolean(row.truncated),
     compressed: Boolean(row.compressed),
+  };
+}
+
+function parseSummaryRow(row) {
+  return {
+    id: Number(row.id),
+    host: row.host,
+    method: row.method,
+    responseStatus: Number(row.response_status || 0),
+    duration: Number(row.duration_ms || 0),
+  };
+}
+
+function parseListRow(row) {
+  return {
+    id: Number(row.id),
+    timestamp: Number(row.timestamp),
+    method: row.method,
+    url: row.url,
+    host: row.host,
+    path: row.path,
+    responseStatus: Number(row.response_status || 0),
+    duration: Number(row.duration_ms || 0),
+    clientLabel: row.client_label || '',
   };
 }
 

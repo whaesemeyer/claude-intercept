@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const zlib = require('node:zlib');
-const { WsFrameParser, OPCODES, parseHandshakeResponse } = require('../ws_frame');
+const { WsFrameParser, OPCODES, parseHandshakeResponse, MAX_EMITTED_MESSAGES } = require('../ws_frame');
 
 // Build a single RFC 6455 frame for testing.
 function buildFrame(opcode, payload, { fin = true, mask = false, rsv1 = false } = {}) {
@@ -152,6 +152,16 @@ test('two frames in a single chunk', () => {
   assert.strictEqual(msgs.length, 2);
   assert.strictEqual(msgs[0].payload.toString('utf8'), 'one');
   assert.strictEqual(msgs[1].payload.toString('utf8'), 'two');
+});
+
+test('one chunk with many tiny frames emits only a bounded number of messages', () => {
+  const p = new WsFrameParser();
+  const tiny = buildFrame(OPCODES.TEXT, '');
+  const frames = Buffer.concat(Array.from({ length: 10_000 }, () => tiny));
+  const messages = p.push(frames);
+  assert.equal(messages.length, MAX_EMITTED_MESSAGES);
+  assert.equal(p.stopped, true);
+  assert.deepStrictEqual(p.push(tiny), []);
 });
 
 test('message byte cap truncates and flags', () => {
