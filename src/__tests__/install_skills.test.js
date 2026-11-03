@@ -36,6 +36,8 @@ test('default installs discoverable skills for both agents without dependencies 
     const text = fs.readFileSync(skill(home, agent), 'utf8');
     assert.match(text, /^---\nname: intercept\ndescription: .+\n---\n/);
     assert.ok(!text.includes('{{CLI}}'));
+    assert.ok(!text.includes('{{SHELL}}'));
+    assert.ok(!text.includes('{{SHELL_NOTE}}'));
     assert.equal(fs.statSync(skill(home, agent)).mode & 0o777, 0o600);
     assert.equal(fs.statSync(path.dirname(skill(home, agent))).mode & 0o777, 0o700);
   }
@@ -151,4 +153,39 @@ test('rendered CLI command works from another directory with shell metacharacter
   });
   assert.equal(run.status, 0, run.stderr);
   assert.deepEqual(JSON.parse(run.stdout), ['status', '--json']);
+});
+
+test('Windows Codex skill invokes quoted Node paths with PowerShell syntax', t => {
+  const { home, tmp } = fixture(t);
+  const root = path.join(tmp, "repo's files & `false` $HOME");
+  fs.mkdirSync(path.join(root, 'scripts'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'src'));
+  for (const file of ['skill.md', 'scripts/install-skills.js']) {
+    fs.copyFileSync(path.join(ROOT, file), path.join(root, file));
+  }
+  const winNode = "C:\\Program Files\\O'Brien\\node.exe";
+  const preload = path.join(tmp, 'windows-platform.js');
+  fs.writeFileSync(preload, `
+    Object.defineProperty(process, 'platform', { value: 'win32' });
+    process.execPath = ${JSON.stringify(winNode)};
+  `);
+  const result = spawnSync(process.execPath, [
+    '--require', preload, path.join(root, 'scripts/install-skills.js'), 'both',
+  ], { env: { ...process.env, HOME: home }, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr);
+
+  const codex = fs.readFileSync(skill(home, 'codex'), 'utf8');
+  const claude = fs.readFileSync(skill(home, 'claude'), 'utf8');
+  const cliPath = path.join(fs.realpathSync(root), 'src/cli.js');
+  const powerShellCommand = `& 'C:\\Program Files\\O''Brien\\node.exe' '${cliPath.replaceAll("'", "''")}' status --json`;
+  assert.ok(codex.includes(powerShellCommand), `Expected ${powerShellCommand}; got ${codex.split('\n').find(line => line.endsWith(' status --json'))}`);
+  assert.match(codex, /```powershell\n/);
+  assert.match(codex, /run these Codex skill commands in PowerShell/);
+  assert.ok(!codex.includes('{{CLI}}'));
+  assert.ok(!codex.includes('{{SHELL}}'));
+  assert.ok(!codex.includes('{{SHELL_NOTE}}'));
+
+  assert.ok(claude.includes(`'${winNode.replaceAll("'", "'\\''")}' '${cliPath.replaceAll("'", "'\\''")}' status --json`));
+  assert.match(claude, /```bash\n/);
+  assert.doesNotMatch(claude, /run these Codex skill commands in PowerShell/);
 });

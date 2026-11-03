@@ -93,6 +93,9 @@ API key, or MCP configuration is needed. Local shell and network access are
 required; a remote Codex environment cannot capture your local browser unless
 you explicitly route its traffic to that proxy.
 
+On Windows, the installed Codex skill uses PowerShell command syntax; select a
+PowerShell shell when running it.
+
 For example: `$intercept capture a fresh sign-in session from my browser and
 verify that the new requests succeed`. The skill checks capture timestamps and
 keeps credential values out of chat. Installing a skill alone does not enable

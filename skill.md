@@ -10,6 +10,8 @@ Claude Code invokes this skill with `/intercept`; Codex CLI and IDE use
 `$intercept` or `/skills`. Both use the same proxy, dashboard, certificates,
 and capture database. The proxy itself needs no model API key or MCP server.
 
+{{SHELL_NOTE}}
+
 Before capture setup, check that this shell runs on the machine receiving the
 browser or device traffic. A remote Codex workspace does not capture the user's
 local browser merely because this skill is installed. Use a local session, or
@@ -20,14 +22,14 @@ If the environment is unclear, establish where the target traffic originates.
 
 For a capture request, check status first:
 
-```bash
+```{{SHELL}}
 {{CLI}} status --json
 ```
 
 If not running, start detached so the shell tool returns and subsequent commands
 can inspect the capture:
 
-```bash
+```{{SHELL}}
 {{CLI}} start --daemon --no-open
 {{CLI}} status --json
 ```
@@ -54,20 +56,20 @@ or CLI they want to capture; reuse context when it is already specified.
 
 For a local desktop, inspect configuration:
 
-```bash
+```{{SHELL}}
 {{CLI}} proxy status --json
 ```
 
 On Linux desktops, install the CA trust:
 
-```bash
+```{{SHELL}}
 {{CLI}} trust
 ```
 
 `trust` is Linux-only and may require a terminal password prompt. Confirm its
 reported steps succeeded before enabling the proxy:
 
-```bash
+```{{SHELL}}
 {{CLI}} proxy on
 ```
 
@@ -92,7 +94,7 @@ Use bounded, host-filtered summary output for the initial inspection; add
 `--device` when relevant and `--after-id` with the baseline ID for a fresh
 capture request:
 
-```bash
+```{{SHELL}}
 {{CLI}} devices --json
 {{CLI}} export --mode summary --host api.example.com --after-id 42 --limit 50 --json
 ```
@@ -122,7 +124,7 @@ read-only diagnosis.
 If this workflow enabled the system proxy, disable it before stopping the
 instance. Stop the instance only if this workflow started it:
 
-```bash
+```{{SHELL}}
 {{CLI}} proxy off
 {{CLI}} stop
 ```
