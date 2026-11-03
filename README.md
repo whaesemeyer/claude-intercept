@@ -17,7 +17,7 @@ Capture traffic from your Mac, iPhone, Android, or any device on your network. I
 - **Bulk actions** — select, export, or delete multiple requests at once
 - **Pause / resume** — stop capturing without interrupting device internet access
 - **Claude Code `/intercept` and Codex `$intercept` skill** — start, analyze, and export from the terminal without touching the browser
-- **Export modes** — `api-docs`, `auth`, `summary`, `full` — structured output optimized for Claude analysis
+- **Export modes** — `api-docs`, `auth`, `summary`, `full` — structured output for local or agent-assisted analysis
 - **QR code cert install** — scan to install the CA cert on iOS/Android, no typing required
 - **Tailscale support** — detects and displays your Tailscale IP for remote device access
 - **Zero native compilation** — uses Node.js built-in `node:sqlite` (no `node-gyp`, no Xcode build step)
@@ -74,27 +74,29 @@ In any Claude Code session:
 ```
 /intercept
 ```
-Claude will start the proxy, open the dashboard, and guide you through setup.
+Claude will check proxy state, start it when needed, and guide you through setup.
 
 ### Option B — Codex skill
 
-In Codex, invoke:
+In Codex CLI or the IDE extension, invoke:
 
 ```text
 $intercept capture traffic from my browser
 ```
 
-You can also select it with `/skills`. Restart Codex if the newly installed
-skill is not listed. The skill uses `start --daemon --no-open`, JSON status,
+You can also select it with `/skills`. In the ChatGPT desktop app, find the
+Intercept skill in the **Skills** sidebar and use a local Codex chat. Codex
+detects skill changes automatically; restart if the skill is not listed. The
+skill uses `start --daemon --no-open`, JSON status,
 and host-filtered exports through the local CLI. No Claude installation, model
 API key, or MCP configuration is needed. Local shell and network access are
 required; a remote Codex environment cannot capture your local browser unless
 you explicitly route its traffic to that proxy.
 
-For example: `$intercept capture a fresh LinkedIn messaging session and verify
-that the new requests succeed`. The skill checks capture timestamps and keeps
-credential values out of chat. Installing a skill alone does not enable the
-system proxy or install certificate trust.
+For example: `$intercept capture a fresh sign-in session from my browser and
+verify that the new requests succeed`. The skill checks capture timestamps and
+keeps credential values out of chat. Installing a skill alone does not enable
+the system proxy or install certificate trust.
 
 ### Option C — CLI
 
@@ -232,7 +234,7 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 
 ---
 
-## Analyzing Traffic with Claude
+## Analyzing Traffic with an Agent
 
 ### From the dashboard
 
@@ -240,12 +242,13 @@ Select `~/claude_intercept/certs/ca.crt` and trust it for websites.
 2. Click **Export Selected →** → choose an export mode → **Generate Export**
 3. Review the output. Share only the summary or a redacted detailed export with an agent.
 
-### From Claude Code
+### From Claude Code or Codex CLI
 
-```
+```text
 /intercept
+$intercept
 ```
-Then ask Claude directly:
+Then ask the agent:
 - *"Analyze the last 50 requests and document all API endpoints"*
 - *"Identify which hosts use authentication without showing credential values"*
 - *"What authentication pattern is this app using?"*
@@ -284,7 +287,7 @@ credential values in chat.
 claude_intercept/
 ├── src/
 │   ├── cli.js              # Commander-based CLI entry point
-│   ├── analyze.js          # Export formatter for Claude (api-docs / auth / summary / full)
+│   ├── analyze.js          # Export formatter (api-docs / auth / summary / full)
 │   ├── setup_wizard.js     # Per-platform setup instructions
 │   ├── system_proxy.js     # macOS/Linux system proxy toggle; Windows manual
 │   ├── proxy/
