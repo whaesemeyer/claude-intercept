@@ -21,8 +21,15 @@ function fixture(t) {
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ version: '1.0.0' }));
   fs.writeFileSync(path.join(src, 'proxy/cert_manager.js'),
     "module.exports = { init() {}, getCACertPath() { return 'fixture-ca.crt'; } };\n");
-  fs.writeFileSync(path.join(src, 'proxy/index.js'),
-    'module.exports = class ProxyServer { async listen() {} close() {} };\n');
+  fs.writeFileSync(path.join(src, 'proxy/index.js'), `
+    module.exports = class ProxyServer {
+      async listen() {}
+      close() {
+        const ms = Number(process.env.TEST_SHUTDOWN_DELAY_MS || 0);
+        if (ms) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      }
+    };
+  `);
   fs.writeFileSync(path.join(src, 'storage/db.js'),
     'module.exports = { init() {}, getStats() { return { total: 0, hosts: 0 }; } };\n');
   fs.writeFileSync(path.join(src, 'ui/server.js'),
@@ -89,6 +96,27 @@ test('daemon status and stop require the private control channel', async t => {
   const stopped = run(cli, env, ['stop']);
   assert.equal(stopped.status, 0, stopped.stderr);
   await waitFor(() => !fs.existsSync(pidFile));
+});
+
+test('stop waits for shutdown before an immediate restart with LAN access', t => {
+  const { cli, env, pidFile, own } = fixture(t);
+  const started = run(cli, { ...env, TEST_SHUTDOWN_DELAY_MS: '1200' },
+    ['start', '--daemon', '--no-open']);
+  assert.equal(started.status, 0, started.stderr);
+  const first = JSON.parse(fs.readFileSync(pidFile, 'utf8'));
+  own(first.pid);
+
+  const stopped = run(cli, env, ['stop']);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.equal(fs.existsSync(pidFile), false);
+
+  const restarted = run(cli, env, ['start', '--daemon', '--no-open', '--lan']);
+  assert.equal(restarted.status, 0, restarted.stderr);
+  assert.match(restarted.stdout, /Claude Intercept started/);
+  const second = JSON.parse(fs.readFileSync(pidFile, 'utf8'));
+  assert.notEqual(second.pid, first.pid);
+  own(second.pid);
+  assert.equal(run(cli, env, ['stop']).status, 0);
 });
 
 test('legacy numeric PID cannot make stop signal an unrelated process', t => {
