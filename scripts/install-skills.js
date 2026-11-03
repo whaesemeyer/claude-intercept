@@ -2,7 +2,7 @@
 'use strict';
 
 // Shared template: both agents execute the same CLI, against this checkout's
-// capture database. No shell interpolation of paths (spaces, $, &, quotes).
+// capture database. Render the invocation for the agent's shell.
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -14,12 +14,24 @@ if (!['claude', 'codex', 'both'].includes(agent) || process.argv.length !== 3) {
   process.exit(1);
 }
 const root = path.resolve(__dirname, '..');
-const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+const quotePosix = value => "'" + value.replaceAll("'", "'\\''") + "'";
+const quotePowerShell = value => "'" + value.replaceAll("'", "''") + "'";
 // Codex desktop may not inherit the PATH used by the terminal that ran this
 // installer. Bind the skill to the verified Node executable used right now.
-const cli = `${quote(process.execPath)} ${quote(path.join(root, 'src/cli.js'))}`;
+const cliPath = path.join(root, 'src/cli.js');
 const template = fs.readFileSync(path.join(root, 'skill.md'), 'utf8');
-const rendered = template.replaceAll('{{CLI}}', () => cli);
+function renderSkill(name) {
+  const powerShell = process.platform === 'win32' && name === 'codex';
+  const cli = powerShell
+    ? `& ${quotePowerShell(process.execPath)} ${quotePowerShell(cliPath)}`
+    : `${quotePosix(process.execPath)} ${quotePosix(cliPath)}`;
+  return template
+    .replaceAll('{{CLI}}', () => cli)
+    .replaceAll('{{SHELL}}', () => powerShell ? 'powershell' : 'bash')
+    .replaceAll('{{SHELL_NOTE}}', () => powerShell
+      ? 'On Windows, run these Codex skill commands in PowerShell. The call operator (`&`) invokes the quoted Node executable.'
+      : '');
+}
 const targets = {
   claude: '.claude',
   codex: '.agents',
@@ -53,7 +65,7 @@ for (const { directories, dir, target } of destinations) {
 for (const { name, dir, target } of destinations) {
   const temporary = path.join(dir, `.SKILL.md.${process.pid}.${randomBytes(6).toString('hex')}`);
   try {
-    fs.writeFileSync(temporary, rendered, { mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(temporary, renderSkill(name), { mode: 0o600, flag: 'wx' });
     fs.renameSync(temporary, target);
     fs.chmodSync(target, 0o600);
   } finally {
