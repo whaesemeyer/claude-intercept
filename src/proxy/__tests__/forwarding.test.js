@@ -392,6 +392,83 @@ test('WebSocket upgrade strips proxy credentials and pins CONNECT authority', as
   assert.equal(wsCapture.requestHeaders['proxy-connection'], undefined);
 });
 
+test('WebSocket upgrade keeps an absolute 15-second deadline until complete 101 headers', t => {
+  let upstream;
+  t.mock.method(tls, 'connect', () => upstream);
+
+  const deadlines = [];
+  const realSetTimeout = global.setTimeout;
+  const realClearTimeout = global.clearTimeout;
+  t.mock.method(global, 'setTimeout', (callback, ms, ...args) => {
+    if (ms !== 15_000) return realSetTimeout(callback, ms, ...args);
+    const timer = { callback, ms, cleared: false };
+    deadlines.push(timer);
+    return timer;
+  });
+  t.mock.method(global, 'clearTimeout', timer => {
+    if (deadlines.includes(timer)) timer.cleared = true;
+    else realClearTimeout(timer);
+  });
+
+  const openUpgrade = () => {
+    upstream = new EventEmitter();
+    const client = new EventEmitter();
+    let upstreamDestroyed = false;
+    let clientDestroyed = false;
+    upstream.setTimeout = upstream.setNoDelay = upstream.write = () => {};
+    upstream.pipe = target => target;
+    upstream.destroy = () => { upstreamDestroyed = true; };
+    client.remoteAddress = '127.0.0.1';
+    client.pause = client.setNoDelay = () => {};
+    client.pipe = target => target;
+    client.destroy = () => { clientDestroyed = true; };
+    const proxy = new ProxyServer({
+      db: { insertCapture() { return 1; }, finalizeWsCapture() {} },
+      broadcast: () => {},
+    });
+    proxy._handleWebSocketUpgrade({
+      method: 'GET', url: '/socket',
+      headers: { host: 'example.com', connection: 'Upgrade', upgrade: 'websocket' },
+      socket: { _interceptHost: 'example.com', _interceptPort: 443 },
+    }, client, Buffer.alloc(0));
+    const deadline = deadlines.at(-1);
+    assert.equal(deadline.ms, 15_000);
+    upstream.emit('secureConnect');
+    return {
+      upstream, client, deadline,
+      destroyed: () => upstreamDestroyed && clientDestroyed,
+    };
+  };
+
+  const trickled = openUpgrade();
+  for (const part of ['HTTP/1.1 101 Switching Protocols\r\n', 'Upgrade: websocket\r\n']) {
+    trickled.upstream.emit('data', Buffer.from(part));
+    assert.equal(trickled.deadline.cleared, false);
+  }
+  trickled.deadline.callback();
+  assert.equal(trickled.destroyed(), true);
+
+  const accepted = openUpgrade();
+  accepted.upstream.emit('data', Buffer.from('HTTP/1.1 101 Switching Protocols\r\n'));
+  assert.equal(accepted.deadline.cleared, false);
+  accepted.upstream.emit('data', Buffer.from('Upgrade: websocket\r\n\r\n'));
+  assert.equal(accepted.deadline.cleared, true);
+  assert.equal(accepted.destroyed(), false);
+  accepted.client.emit('close');
+
+  const rejected = openUpgrade();
+  rejected.upstream.emit('data', Buffer.from('HTTP/1.1 403 Forbidden\r\n\r\n'));
+  assert.equal(rejected.deadline.cleared, false);
+  rejected.deadline.callback();
+  assert.equal(rejected.destroyed(), true);
+
+  const oversized = openUpgrade();
+  oversized.upstream.emit('data', Buffer.alloc(16 * 1024, 0x61));
+  assert.equal(oversized.deadline.cleared, false);
+  oversized.deadline.callback();
+  assert.equal(oversized.destroyed(), true);
+});
+
 test('WebSocket observation records a bounded prefix without replacing the tunnel', t => {
   const upstream = new EventEmitter();
   const client = new EventEmitter();

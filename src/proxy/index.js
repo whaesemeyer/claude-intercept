@@ -519,8 +519,8 @@ class ProxyServer {
       servername: net.isIP(host) ? undefined : host,
       ALPNProtocols: ['http/1.1'],
     });
-    // A socket inactivity timeout is not a reliable deadline for every phase
-    // of DNS, TCP, and TLS setup. Bound the whole upstream handshake.
+    // Bound DNS, TCP, TLS, and the HTTP Upgrade response together. A socket
+    // inactivity timeout alone can be defeated by trickled response headers.
     const handshakeTimer = setTimeout(() => cleanup(0), 15_000);
 
     let closed = false;
@@ -543,7 +543,6 @@ class ProxyServer {
 
     upstream.once('secureConnect', () => {
       if (closed) return;
-      clearTimeout(handshakeTimer);
       upstream.setTimeout(300_000, () => cleanup(0));
       try { upstream.setNoDelay?.(true); } catch {}
 
@@ -585,6 +584,7 @@ class ProxyServer {
             negotiatedStatus = response.status;
             handshakeBuf = Buffer.alloc(0);
             if (response.status !== 101) return;
+            clearTimeout(handshakeTimer);
             clientFrames = new WsFrameParser({ permessageDeflate: response.permessageDeflate });
             serverFrames = new WsFrameParser({ permessageDeflate: response.permessageDeflate });
             data = chunk.subarray(end + 4 - previousBytes);
