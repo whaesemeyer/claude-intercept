@@ -7,6 +7,7 @@ const fs = require('fs');
 
 const DB_DIR = path.join(__dirname, '../../captures');
 const DB_PATH = path.join(DB_DIR, 'captures.db');
+const MAX_QUERY_LIMIT = 5000;
 
 let db;
 
@@ -131,6 +132,12 @@ function queryCaptures({
   limit = 100,
   offset = 0,
 } = {}) {
+  const requestedLimit = Number(limit);
+  const requestedOffset = Number(offset);
+  const boundedLimit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+    ? Math.min(requestedLimit, MAX_QUERY_LIMIT) : 100;
+  const boundedOffset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+    ? requestedOffset : 0;
   const conditions = [];
   const params = {};
 
@@ -187,7 +194,7 @@ function queryCaptures({
     .prepare(
       `SELECT * FROM captures ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`
     )
-    .all({ ...params, $limit: limit, $offset: offset });
+    .all({ ...params, $limit: boundedLimit, $offset: boundedOffset });
 
   return {
     total: Number(total),
@@ -205,8 +212,10 @@ function clearCaptures() {
 }
 
 function deleteCaptures(ids) {
+  if (!Array.isArray(ids)) throw new TypeError('ids must be an array');
+  if (ids.length === 0) return 0;
   const placeholders = ids.map(() => '?').join(',');
-  db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids);
+  return db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids).changes;
 }
 
 function getStats() {
