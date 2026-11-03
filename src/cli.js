@@ -477,7 +477,7 @@ program
 
 program
   .command('export')
-  .description('Export captures to stdout for Claude analysis')
+  .description('Export captures to stdout for local analysis')
   .option('--mode <mode>', 'Export mode: api-docs | auth | summary | full', 'summary')
   .option('--host <host>', 'Filter by host')
   .option('--device <label>', 'Filter by device label (see "devices")')
@@ -543,7 +543,8 @@ program
   .description('Install & trust the CA on Linux (system store + Chrome/Chromium + Firefox)')
   .action(() => {
     if (os.platform() !== 'linux') {
-      console.log(chalk.yellow('  Automated trust is Linux-only. On macOS use the Setup tab; on Windows import the cert manually.'));
+      console.error(chalk.yellow('  Automated trust is Linux-only. On macOS use the Setup tab; on Windows import the cert manually.'));
+      process.exitCode = 1;
       return;
     }
     const certManager = require('./proxy/cert_manager');
@@ -553,6 +554,7 @@ program
     console.log(chalk.dim('  You may be prompted for your sudo password.\n'));
     const result = trustCertLinux({ prefer: 'sudo' });
     printTrustSteps(result);
+    if (!result.ok) process.exitCode = 1;
   });
 
 program
@@ -560,7 +562,8 @@ program
   .description('Remove the Claude Intercept CA from Linux trust stores')
   .action(() => {
     if (os.platform() !== 'linux') {
-      console.log(chalk.yellow('  Automated untrust is Linux-only.'));
+      console.error(chalk.yellow('  Automated untrust is Linux-only.'));
+      process.exitCode = 1;
       return;
     }
     const { untrustCertLinux } = require('./setup_wizard');
@@ -568,6 +571,7 @@ program
     console.log(chalk.dim('  You may be prompted for your sudo password.\n'));
     const result = untrustCertLinux({ prefer: 'sudo' });
     printTrustSteps(result);
+    if (!result.ok) process.exitCode = 1;
   });
 
 const proxyCmd = program

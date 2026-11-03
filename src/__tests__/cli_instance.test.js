@@ -119,3 +119,38 @@ test('shutdown leaves a PID file replaced by another instance untouched', async 
   await waitFor(() => !fs.existsSync(record.controlPath));
   assert.deepEqual(JSON.parse(fs.readFileSync(pidFile, 'utf8')), replacement);
 });
+
+test('CA trust commands fail when unsupported or incomplete', t => {
+  const { root, cli, env } = fixture(t);
+  fs.writeFileSync(path.join(root, 'src/setup_wizard.js'), `
+    const result = () => {
+      const ok = process.env.TEST_TRUST_OK === '1';
+      return { ok, steps: [{ name: 'System trust store', ok }] };
+    };
+    module.exports = { trustCertLinux: result, untrustCertLinux: result };
+  `);
+  const runPlatform = (platform, command, ok = false) => {
+    const preload = path.join(root, `platform-${platform}.js`);
+    fs.writeFileSync(preload, `require('node:os').platform = () => '${platform}';\n`);
+    return spawnSync(process.execPath, ['--require', preload, cli, command], {
+      env: { ...env, TEST_TRUST_OK: ok ? '1' : '0' },
+      encoding: 'utf8', timeout: 15000,
+    });
+  };
+
+  for (const platform of ['darwin', 'win32']) {
+    for (const command of ['trust', 'untrust']) {
+      const result = runPlatform(platform, command);
+      assert.equal(result.status, 1, `${platform} ${command}: ${result.stderr}`);
+      assert.match(result.stderr, /Linux-only/);
+    }
+  }
+  for (const command of ['trust', 'untrust']) {
+    const failed = runPlatform('linux', command);
+    assert.equal(failed.status, 1, failed.stderr);
+    assert.match(failed.stdout, /Some steps need attention/);
+    const succeeded = runPlatform('linux', command, true);
+    assert.equal(succeeded.status, 0, succeeded.stderr);
+    assert.match(succeeded.stdout, /All steps completed/);
+  }
+});
