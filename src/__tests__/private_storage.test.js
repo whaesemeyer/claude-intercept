@@ -129,3 +129,38 @@ test('capture queries bound invalid limits and empty deletes are harmless', t =>
   `);
   assert.deepEqual(result, { length: 100, firstId: 120, emptyDelete: 0, count: 120 });
 });
+
+test('capture database stops growing at its limit and resumes after clearing', t => {
+  const { modulePath } = fixture(t, 'storage/db.js');
+  const result = runFixture(modulePath, `
+    const storage = require(process.argv[1]);
+    storage.init({ maxCaptureBytes: 1024 * 1024 });
+    const capture = {
+      timestamp: Date.now(), method: 'GET', url: 'https://example.com/',
+      host: 'example.com', path: '/', responseStatus: 200,
+      responseBody: 'x'.repeat(200 * 1024),
+    };
+    let inserted = 0;
+    let errorCode = null;
+    for (let i = 0; i < 20; i++) {
+      try { storage.insertCapture(capture); inserted++; }
+      catch (err) { errorCode = err.code; break; }
+    }
+    const full = storage.getStats();
+    const { spawnSync } = require('node:child_process');
+    const cleared = spawnSync(process.execPath,
+      ['-e', 'const storage = require(process.argv[1]); storage.init(); storage.clearCaptures();', process.argv[1]],
+      { encoding: 'utf8' });
+    if (cleared.status !== 0) throw new Error(cleared.stderr);
+    storage.insertCapture(capture);
+    const resumed = storage.getStats();
+    console.log(JSON.stringify({ inserted, errorCode, full, resumed }));
+  `);
+  assert.ok(result.inserted > 0 && result.inserted < 20);
+  assert.equal(result.errorCode, 'CAPTURE_QUOTA_EXCEEDED');
+  assert.equal(result.full.total, result.inserted);
+  assert.equal(result.full.storageLimitReached, true);
+  assert.ok(result.full.storageBytes <= result.full.storageLimitBytes);
+  assert.equal(result.resumed.total, 1);
+  assert.equal(result.resumed.storageLimitReached, false);
+});
