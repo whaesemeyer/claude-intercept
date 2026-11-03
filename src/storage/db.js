@@ -7,11 +7,36 @@ const fs = require('fs');
 
 const DB_DIR = path.join(__dirname, '../../captures');
 const DB_PATH = path.join(DB_DIR, 'captures.db');
+const MAX_QUERY_LIMIT = 5000;
 
 let db;
 
+function secureFile(filePath) {
+  try {
+    if (!fs.lstatSync(filePath).isFile()) {
+      throw new Error(`Capture database path is not a regular file: ${filePath}`);
+    }
+    fs.chmodSync(filePath, 0o600);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+}
+
 function init() {
-  if (!fs.existsSync(DB_DIR)) fs.mkdirSync(DB_DIR, { recursive: true });
+  fs.mkdirSync(DB_DIR, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(DB_DIR).isDirectory()) {
+    throw new Error(`Capture path is not a directory: ${DB_DIR}`);
+  }
+  fs.chmodSync(DB_DIR, 0o700);
+  for (const filePath of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`, `${DB_PATH}-journal`]) {
+    secureFile(filePath);
+  }
+
+  // SQLite does not expose a file-mode option. Pre-create the database with
+  // owner-only access before SQLite opens it.
+  const fd = fs.openSync(DB_PATH, 'a', 0o600);
+  fs.closeSync(fd);
+  secureFile(DB_PATH);
 
   db = new DatabaseSync(DB_PATH);
   db.exec('PRAGMA journal_mode = WAL');
@@ -47,6 +72,12 @@ function init() {
   try { db.exec("ALTER TABLE captures ADD COLUMN response_body_size INTEGER DEFAULT 0"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN request_encoding TEXT DEFAULT 'identity'"); } catch {}
   try { db.exec("ALTER TABLE captures ADD COLUMN request_body_size INTEGER DEFAULT 0"); } catch {}
+
+  // WAL/SHM files may be created by the first schema write, after the database
+  // connection opens. Match the database's owner-only permissions.
+  for (const filePath of [`${DB_PATH}-wal`, `${DB_PATH}-shm`, `${DB_PATH}-journal`]) {
+    secureFile(filePath);
+  }
 
   return db;
 }
@@ -101,6 +132,12 @@ function queryCaptures({
   limit = 100,
   offset = 0,
 } = {}) {
+  const requestedLimit = Number(limit);
+  const requestedOffset = Number(offset);
+  const boundedLimit = Number.isSafeInteger(requestedLimit) && requestedLimit > 0
+    ? Math.min(requestedLimit, MAX_QUERY_LIMIT) : 100;
+  const boundedOffset = Number.isSafeInteger(requestedOffset) && requestedOffset >= 0
+    ? requestedOffset : 0;
   const conditions = [];
   const params = {};
 
@@ -157,7 +194,7 @@ function queryCaptures({
     .prepare(
       `SELECT * FROM captures ${where} ORDER BY id DESC LIMIT $limit OFFSET $offset`
     )
-    .all({ ...params, $limit: limit, $offset: offset });
+    .all({ ...params, $limit: boundedLimit, $offset: boundedOffset });
 
   return {
     total: Number(total),
@@ -175,8 +212,10 @@ function clearCaptures() {
 }
 
 function deleteCaptures(ids) {
+  if (!Array.isArray(ids)) throw new TypeError('ids must be an array');
+  if (ids.length === 0) return 0;
   const placeholders = ids.map(() => '?').join(',');
-  db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids);
+  return db.prepare(`DELETE FROM captures WHERE id IN (${placeholders})`).run(...ids).changes;
 }
 
 function getStats() {

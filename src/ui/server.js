@@ -3,12 +3,20 @@
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
 const path = require('path');
 const os = require('os');
+const net = require('net');
 const QRCode = require('qrcode');
 const db = require('../storage/db');
 const certManager = require('../proxy/cert_manager');
 const { buildClaudeExport } = require('../analyze');
+
+const dashboardHtml = fs.readFileSync(path.join(__dirname, 'public/index.html'), 'utf8');
+const inlineScript = dashboardHtml.match(/<script>([\s\S]*?)<\/script>/i);
+if (!inlineScript) throw new Error('Dashboard script is missing');
+const scriptHash = crypto.createHash('sha256').update(inlineScript[1]).digest('base64');
 
 function getNetworkInfo() {
   const ifaces = os.networkInterfaces();
@@ -36,13 +44,91 @@ function getNetworkInfo() {
   return { lanIp: lanIp || '127.0.0.1', tailscaleIp };
 }
 
-function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null }) {
+function isLoopbackAddress(address) {
+  return address === '::1' || /^127\./.test(address || '') ||
+    /^::ffff:127\./i.test(address || '');
+}
+
+function canAccessDashboard(address, method, requestPath, lanEnabled) {
+  if (isLoopbackAddress(address)) return true;
+  // Phones only need to download the public CA certificate. Keep captures,
+  // control routes, and the live WebSocket stream on the local machine even
+  // when the proxy accepts traffic from the LAN.
+  return lanEnabled && (method === 'GET' || method === 'HEAD') &&
+    requestPath === '/api/cert';
+}
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number)) return fallback;
+  return Math.min(Math.max(number, minimum), maximum);
+}
+
+function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
+  uiHost = '127.0.0.1', proxyOwnerId = null }) {
+  if (uiHost !== '127.0.0.1' && uiHost !== '0.0.0.0') {
+    throw new Error('Dashboard host must be 127.0.0.1 or 0.0.0.0');
+  }
+  const lanEnabled = uiHost === '0.0.0.0';
+
+  // A browser page can reach localhost even when the dashboard only listens
+  // there. Restrict Host to IP literals/localhost to prevent DNS rebinding,
+  // and require browser requests to come from this dashboard's own origin.
+  function allowedHost(authority) {
+    if (typeof authority !== 'string' || /[\/?#@]/.test(authority)) return false;
+    try {
+      const parsed = new URL(`http://${authority}`);
+      if (parsed.host.toLowerCase() !== authority.toLowerCase()) return false;
+      const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+      return hostname === 'localhost' || hostname === '127.0.0.1' ||
+        (lanEnabled && net.isIP(hostname) !== 0);
+    } catch {
+      return false;
+    }
+  }
+
+  function allowedOrigin(req) {
+    if (req.path === '/api/cert' && (req.method === 'GET' || req.method === 'HEAD')) {
+      return true; // Public CA certificate download from a phone or QR scanner.
+    }
+    const fetchSite = req.headers['sec-fetch-site'];
+    if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') return false;
+    const origin = req.headers.origin;
+    if (!origin) return true; // CLI clients do not send Origin.
+    try {
+      const parsed = new URL(origin);
+      return parsed.protocol === 'http:' &&
+        parsed.host.toLowerCase() === req.headers.host.toLowerCase();
+    } catch {
+      return false;
+    }
+  }
+
   const app = express();
+  app.use((req, res, next) => {
+    res.set({
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'X-Frame-Options': 'DENY',
+    });
+    if (!allowedHost(req.headers.host) || !allowedOrigin(req) ||
+        !canAccessDashboard(req.socket.remoteAddress, req.method, req.path, lanEnabled)) {
+      return res.status(403).end();
+    }
+    res.set('Content-Security-Policy',
+      `default-src 'self'; script-src 'sha256-${scriptHash}'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws://${req.headers.host}; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; form-action 'none'`);
+    next();
+  });
   app.use(express.json());
-  app.use(express.static(path.join(__dirname, 'public')));
 
   const httpServer = http.createServer(app);
-  const wss = new WebSocket.Server({ server: httpServer });
+  const dashboardPort = () => httpServer.address()?.port || uiPort;
+  const wss = new WebSocket.Server({
+    server: httpServer,
+    verifyClient: ({ req }) => isLoopbackAddress(req.socket.remoteAddress) &&
+      allowedHost(req.headers.host) && allowedOrigin(req),
+  });
 
   const clients = new Set();
   wss.on('connection', (ws) => {
@@ -64,6 +150,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
 
   app.get('/api/status', (req, res) => {
     const { lanIp, tailscaleIp } = getNetworkInfo();
+    const port = dashboardPort();
     const platform = os.platform();
     let de = null;
     if (platform === 'linux') {
@@ -71,13 +158,13 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
     }
     res.json({
       proxy: { port: proxyPort, running: true },
-      ui: { port: uiPort },
+      ui: { port, host: uiHost, lanEnabled },
       platform,
       de,
       lanIp,
       tailscaleIp,
-      certUrl: `http://${lanIp}:${uiPort}/api/cert`,
-      tailscaleCertUrl: tailscaleIp ? `http://${tailscaleIp}:${uiPort}/api/cert` : null,
+      certUrl: `http://${lanEnabled ? lanIp : '127.0.0.1'}:${port}/api/cert`,
+      tailscaleCertUrl: lanEnabled && tailscaleIp ? `http://${tailscaleIp}:${port}/api/cert` : null,
       stats: db.getStats(),
     });
   });
@@ -109,8 +196,8 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
       hasAuth: hasAuth === 'true',
       device,
       afterId: afterId ? Number(afterId) : undefined,
-      limit: Math.min(Number(limit) || 100, 500),
-      offset: Number(offset) || 0,
+      limit: boundedInteger(limit, 100, 1, 500),
+      offset: boundedInteger(offset, 0, 0, Number.MAX_SAFE_INTEGER),
     });
     res.json(result);
   });
@@ -140,7 +227,7 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
   });
 
   app.get('/api/analyze', (req, res) => {
-    const { ids, host, mode = 'api-docs' } = req.query;
+    const { ids, host, mode = 'summary' } = req.query;
     let captures;
 
     if (ids) {
@@ -169,21 +256,25 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
   app.get('/api/setup/:platform', (req, res) => {
     const { getSetupInstructions } = require('../setup_wizard');
     const { lanIp, tailscaleIp } = getNetworkInfo();
-    res.json(getSetupInstructions(req.params.platform, proxyPort, lanIp, tailscaleIp));
+    res.json(getSetupInstructions(req.params.platform, proxyPort, lanIp, tailscaleIp, {
+      uiPort: dashboardPort(), lanEnabled,
+    }));
   });
 
   // System proxy toggle (local machine only — localhost access)
   app.post('/api/proxy/on', (req, res) => {
     const sysProxy = require('../system_proxy');
-    const result = sysProxy.enable(proxyPort);
+    const result = sysProxy.enable(proxyPort, { ownerId: proxyOwnerId });
+    if (result.error) return res.status(409).json(result);
     broadcast({ type: 'sysProxyChanged', data: { enabled: true } });
     res.json(result);
   });
 
   app.post('/api/proxy/off', (req, res) => {
     const sysProxy = require('../system_proxy');
-    const result = sysProxy.disable();
-    broadcast({ type: 'sysProxyChanged', data: { enabled: false } });
+    const result = sysProxy.disable({ ownerId: proxyOwnerId });
+    if (result.error) return res.status(409).json(result);
+    if (result.deactivated?.length) broadcast({ type: 'sysProxyChanged', data: { enabled: false } });
     res.json(result);
   });
 
@@ -229,19 +320,26 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null 
 
   // Serve SPA for all other routes
   app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public/index.html'));
+    res.type('html').send(dashboardHtml);
   });
 
   function listen() {
     return new Promise((resolve, reject) => {
-      httpServer.listen(uiPort, '0.0.0.0', (err) => {
-        if (err) return reject(err);
-        resolve(uiPort);
+      httpServer.once('error', reject);
+      httpServer.listen(uiPort, uiHost, () => {
+        httpServer.off('error', reject);
+        resolve(httpServer.address().port);
       });
     });
   }
 
-  return { broadcast, listen, app };
+  function close() {
+    return new Promise((resolve, reject) => {
+      httpServer.close(err => err ? reject(err) : resolve());
+    });
+  }
+
+  return { broadcast, listen, close, app, httpServer };
 }
 
-module.exports = { createUIServer };
+module.exports = { createUIServer, canAccessDashboard };
