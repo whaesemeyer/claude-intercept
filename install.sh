@@ -1,9 +1,27 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKILL_DEST_DIR="$HOME/.claude/skills/intercept"
-SKILL_DEST="$SKILL_DEST_DIR/SKILL.md"
+AGENT="both"
+SKILLS_ONLY=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --agent)
+      if [ "$#" -lt 2 ]; then echo "Missing --agent value (claude, codex, both)" >&2; exit 1; fi
+      AGENT="$2"; shift 2 ;;
+    --skills-only) SKILLS_ONLY=true; shift ;;
+    -h|--help)
+      echo "Usage: bash install.sh [--agent claude|codex|both] [--skills-only]"
+      echo "Default: install both skills, dependencies, and CLI link."
+      echo "--skills-only: install skills without npm, sudo, or runtime changes."
+      exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 1 ;;
+  esac
+done
+case "$AGENT" in
+  claude|codex|both) ;;
+  *) echo "Unknown agent: $AGENT (expected claude, codex, both)" >&2; exit 1 ;;
+esac
 
 echo ""
 echo "  ⊕ Claude Intercept — Installer"
@@ -11,18 +29,23 @@ echo ""
 
 # ── Check Node.js ─────────────────────────────────────────────────────────────
 if ! command -v node &>/dev/null; then
-  echo "  ✗ Node.js not found. Install from https://nodejs.org (v22.5+)"
+  echo "  ✗ Node.js not found. Install from https://nodejs.org (v22.15+)"
   exit 1
 fi
 
 NODE_VER=$(node -e "console.log(process.versions.node.split('.')[0])")
 NODE_MINOR=$(node -e "console.log(process.versions.node.split('.')[1])")
-if [ "$NODE_VER" -lt 22 ] || { [ "$NODE_VER" -eq 22 ] && [ "$NODE_MINOR" -lt 5 ]; }; then
-  echo "  ✗ Node.js v22.5+ required (found $(node --version))"
+if [ "$NODE_VER" -lt 22 ] || { [ "$NODE_VER" -eq 22 ] && [ "$NODE_MINOR" -lt 15 ]; }; then
+  echo "  ✗ Node.js v22.15+ required (found $(node --version))"
   echo "    Requires built-in node:sqlite (available from v22.5). Install from https://nodejs.org"
   exit 1
 fi
 echo "  ✓ Node.js $(node --version)"
+
+if [ "$SKILLS_ONLY" = true ]; then
+  node "$SCRIPT_DIR/scripts/install-skills.js" "$AGENT"
+  exit 0
+fi
 
 # ── Install npm dependencies ──────────────────────────────────────────────────
 echo "  → Installing dependencies…"
@@ -39,12 +62,8 @@ fi
 chmod +x "$SCRIPT_DIR/src/cli.js"
 echo "  ✓ CLI ready"
 
-# ── Install Claude Code skill (templated with real install path) ──────────────
-mkdir -p "$SKILL_DEST_DIR"
-# Substitute the actual install path so /intercept works from any location
-sed "s|~/claude_intercept|${SCRIPT_DIR}|g" "$SCRIPT_DIR/skill.md" > "$SKILL_DEST"
-echo "  ✓ Skill installed → $SKILL_DEST"
-echo "    Use /intercept in Claude Code to invoke it"
+# ── Install agent skills with the real checkout path ─────────────────────────
+node "$SCRIPT_DIR/scripts/install-skills.js" "$AGENT"
 
 # ── Ensure runtime dirs exist (excluded from git) ─────────────────────────────
 mkdir -p "$SCRIPT_DIR/captures" "$SCRIPT_DIR/certs"
@@ -65,6 +84,10 @@ echo ""
 echo "  Quick start:"
 echo "    claude-intercept start"
 echo ""
-echo "  Or from Claude Code:"
-echo "    /intercept"
+if [ "$AGENT" != codex ]; then
+  echo "  Claude Code: /intercept"
+fi
+if [ "$AGENT" != claude ]; then
+  echo '  Codex: $intercept (restart Codex if it is not listed yet)'
+fi
 echo ""
