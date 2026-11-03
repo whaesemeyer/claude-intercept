@@ -179,6 +179,10 @@
   .inspector-header .meta-line { display: flex; gap: 12px; margin-top: 4px; font-size: 11px; color: var(--text3); }
   .inspector-tabs { display: flex; border-bottom: 1px solid var(--border2); background: var(--surface); flex-shrink: 0; }
   .inspector-tabs button { background: none; border: none; color: var(--text2); padding: 6px 12px; cursor: pointer; font-size: 12px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .ws-frame { border-bottom: 1px solid var(--border2); padding: 8px 0; }
+  .ws-frame pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto; }
+  .ws-frame-meta { color: var(--text3); font-size: 11px; margin-bottom: 4px; }
+  .ws-page { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; color: var(--text3); font-size: 11px; }
   .inspector-tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
   .inspector-tabs button:hover { color: var(--text); }
   .inspector-body { flex: 1; overflow-y: auto; padding: 12px 14px; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
@@ -771,6 +775,12 @@ let TAILSCALE_IP = null;
 let PLATFORM = null;
 let DE = null;
 let capturePaused = false;
+let wsFrames = [];
+let wsFrameOffset = 0;
+let wsFrameTotal = 0;
+let wsFramesConnId = null;
+let wsFrameRequest = 0;
+let wsRefreshTimer = null;
 const ACTION_HEADERS = { 'X-Claude-Intercept-Action': '1' };
 
 function updateStorageWarning(reached) {
@@ -803,12 +813,25 @@ function connectWS() {
     if (msg.type === 'capture') {
       addCapture(msg.data);
       updateStorageWarning(false);
+    } else if (msg.type === 'wsFrame') {
+      if (msg.data.connectionId === wsFramesConnId && inspectorTab === 'ws-frames') {
+        clearTimeout(wsRefreshTimer);
+        wsRefreshTimer = setTimeout(() => loadWsFrames(wsFramesConnId, null), 250);
+      }
+    } else if (msg.type === 'wsClosed') {
+      const c = captures.find(row => row.id === msg.data.id);
+      if (c) Object.assign(c, msg.data);
+      if (inspectorCapture?.id === msg.data.id) {
+        Object.assign(inspectorCapture, msg.data);
+        renderInspector(inspectorCapture);
+      }
     } else if (msg.type === 'stats') {
       updateStats(msg.data);
     } else if (msg.type === 'captureStorageFull') {
       updateStorageWarning(true);
     } else if (msg.type === 'cleared') {
       captures = []; selectedId = null; selectedCaptures.clear(); inspectorCapture = null;
+      wsFrames = []; wsFramesConnId = null; wsFrameRequest++;
       renderList(); showInspectorEmpty(); updateSelCount(); applyFilters();
       refreshStorageStatus();
     } else if (msg.type === 'deleted') {
@@ -1258,6 +1281,8 @@ async function fetchCapture(id) {
 
 // ── Inspector ─────────────────────────────────────────────────────────────────
 function showInspectorEmpty() {
+  wsFramesConnId = null;
+  wsFrameRequest++;
   document.getElementById('inspector').innerHTML = `<div class="inspector-empty">
     <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
       <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
@@ -1267,6 +1292,10 @@ function showInspectorEmpty() {
 }
 
 function renderInspector(c) {
+  if (c.method === 'WS' && inspectorTab !== 'ws-frames' && inspectorTab !== 'req-headers') {
+    inspectorTab = 'ws-frames';
+  }
+  if (c.method !== 'WS' && inspectorTab === 'ws-frames') inspectorTab = 'req-headers';
   const status = Number(c.responseStatus) || 0;
   const method = String(c.method || 'GET');
   const methodClass = methodBadgeClass(method);
@@ -1294,12 +1323,14 @@ function renderInspector(c) {
       </div>
     </div>
     <div class="inspector-tabs">
+      ${c.method === 'WS' ? `<button class="${inspectorTab==='ws-frames'?'active':''}" data-inspector-tab="ws-frames">Frames</button>` : ''}
       <button class="${inspectorTab==='req-headers'?'active':''}" data-inspector-tab="req-headers">Req Headers</button>
-      <button class="${inspectorTab==='req-body'?'active':''}" data-inspector-tab="req-body">Req Body</button>
+      ${c.method === 'WS' ? '' : `<button class="${inspectorTab==='req-body'?'active':''}" data-inspector-tab="req-body">Req Body</button>
       <button class="${inspectorTab==='res-headers'?'active':''}" data-inspector-tab="res-headers">Res Headers</button>
-      <button class="${inspectorTab==='res-body'?'active':''}" data-inspector-tab="res-body">Res Body</button>
+      <button class="${inspectorTab==='res-body'?'active':''}" data-inspector-tab="res-body">Res Body</button>`}
     </div>
     <div class="inspector-body" id="insp-body">${renderInspBody(c, inspectorTab)}</div>`;
+  if (c.method === 'WS' && inspectorTab === 'ws-frames') loadWsFrames(c.id, null);
 }
 
 function switchInspTab(tab, btn) {
@@ -1308,14 +1339,55 @@ function switchInspTab(tab, btn) {
   btn.classList.add('active');
   if (!inspectorCapture) return;
   document.getElementById('insp-body').innerHTML = renderInspBody(inspectorCapture, tab);
+  if (tab === 'ws-frames') loadWsFrames(inspectorCapture.id, null);
 }
 
 function renderInspBody(c, tab) {
+  if (tab === 'ws-frames') return '<span style="color:var(--text3)">Loading frames…</span>';
   if (tab === 'req-headers') return headersTable(c.requestHeaders || {});
   if (tab === 'res-headers') return headersTable(c.responseHeaders || {});
   if (tab === 'req-body')    return bodyContent(c.requestBody, '', c.requestEncoding, c.requestBodySize);
   if (tab === 'res-body')    return bodyContent(c.responseBody, c.contentType, c.responseEncoding, c.responseBodySize);
   return '';
+}
+
+const WS_OPCODES = { 1: 'text', 2: 'binary', 8: 'close' };
+async function loadWsFrames(id, offset = null) {
+  if (!Number.isSafeInteger(id) || id < 1) return;
+  const request = ++wsFrameRequest;
+  wsFramesConnId = id;
+  const query = offset === null ? 'limit=50&tail=true' : `limit=50&offset=${offset}`;
+  try {
+    const res = await fetch(`/api/captures/${id}/frames?${query}`);
+    if (!res.ok) throw new Error('Frame history unavailable');
+    const data = await res.json();
+    if (request !== wsFrameRequest || inspectorCapture?.id !== id || inspectorTab !== 'ws-frames') return;
+    wsFrames = data.frames.slice(0, 50);
+    wsFrameOffset = data.offset;
+    wsFrameTotal = data.total;
+    renderWsFrames();
+  } catch {
+    if (request === wsFrameRequest) document.getElementById('insp-body').textContent = 'Could not load frames.';
+  }
+}
+
+function renderWsFrames() {
+  const start = wsFrames.length ? wsFrameOffset + 1 : 0;
+  const end = wsFrameOffset + wsFrames.length;
+  const controls = `<div class="ws-page">
+    <button data-ws-offset="${Math.max(0, wsFrameOffset - 50)}" ${wsFrameOffset === 0 ? 'disabled' : ''}>Previous</button>
+    <span>${start}–${end} of ${wsFrameTotal} frames</span>
+    <button data-ws-offset="${wsFrameOffset + 50}" ${end >= wsFrameTotal ? 'disabled' : ''}>Next</button>
+    <button data-ws-tail="1">Latest</button>
+  </div>`;
+  const rows = wsFrames.map(frame => {
+    const direction = frame.direction === 'client→server' ? 'Client → Server' : 'Server → Client';
+    const opcode = WS_OPCODES[frame.opcode] || 'control';
+    const tag = frame.isText ? '' : ' (base64/hex)';
+    return `<div class="ws-frame"><div class="ws-frame-meta">${direction} · ${opcode}${tag}${frame.truncated ? ' · truncated' : ''}</div>
+      <pre>${escHtml(frame.payload)}</pre></div>`;
+  }).join('') || '<div style="color:var(--text3)">No frames captured.</div>';
+  document.getElementById('insp-body').innerHTML = controls + rows;
 }
 
 function headersTable(headers) {
@@ -1595,6 +1667,11 @@ function bindEvents() {
     else selectCapture(id, e);
   });
   on('inspector', 'click', e => {
+    const page = e.target.closest('button[data-ws-offset],button[data-ws-tail]');
+    if (page && inspectorCapture?.method === 'WS') {
+      loadWsFrames(inspectorCapture.id, page.dataset.wsTail ? null : Number(page.dataset.wsOffset));
+      return;
+    }
     const btn = e.target.closest('button[data-inspector-tab]');
     if (btn) switchInspTab(btn.dataset.inspectorTab, btn);
   });

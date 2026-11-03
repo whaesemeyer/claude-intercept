@@ -268,6 +268,32 @@ function createUIServer({ uiPort = 7778, proxyPort = 7777, proxyInstance = null,
     res.json(capture);
   });
 
+  // WebSocket frames for a connection-level capture (method 'WS').
+  app.get('/api/captures/:id/frames', (req, res) => {
+    const id = parseIds(req.params.id, 1)?.[0];
+    if (!id) return res.status(400).json({ error: 'Invalid capture ID' });
+    if (!validQueryStrings(req.query, { limit: 20, offset: 20, tail: 5 })) {
+      return res.status(400).json({ error: 'Invalid frame page' });
+    }
+    const capture = db.getCaptureById(id, { summaryOnly: true });
+    if (!capture || capture.method !== 'WS') return res.status(404).json({ error: 'Not found' });
+    const limit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+    const requestedOffset = req.query.offset === undefined ? 0 : Number(req.query.offset);
+    const tail = req.query.tail === 'true';
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 ||
+        !Number.isSafeInteger(requestedOffset) || requestedOffset < 0 ||
+        (req.query.tail !== undefined && req.query.tail !== 'true')) {
+      return res.status(400).json({ error: 'Invalid frame page' });
+    }
+    const total = db.getWsFrameCount(id);
+    const offset = tail ? Math.max(0, total - limit) : requestedOffset;
+    res.json({
+      total,
+      offset,
+      frames: db.getWsFrames(id, { limit, offset }),
+    });
+  });
+
   app.delete('/api/captures', (req, res) => {
     db.clearCaptures();
     broadcast({ type: 'cleared' });
